@@ -3,16 +3,25 @@
 use sha2::{Digest, Sha256};
 
 use crate::domain::content::Chunk;
+use crate::scan::label::{label_lines, LineLabel};
 
 /// Extraction / normalization options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractOptions {
     pub tab_width: usize,
+    pub include_imports: bool,
+    pub include_doc_comments: bool,
+    pub include_comments: bool,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
-        Self { tab_width: 4 }
+        Self {
+            tab_width: 4,
+            include_imports: false,
+            include_doc_comments: true,
+            include_comments: false,
+        }
     }
 }
 
@@ -65,7 +74,7 @@ pub fn hash_normalized(normalized: &str) -> String {
 /// Display line ranges use original 1-based line numbers of kept lines.
 /// Returns an empty vec when nothing remains after normalization.
 pub fn extract_chunks(relative_path: &str, original: &str, opts: ExtractOptions) -> Vec<Chunk> {
-    let line_map = map_original_to_normalized_lines(original, opts.tab_width);
+    let line_map = map_original_to_normalized_lines(relative_path, original, opts);
     if line_map.is_empty() {
         return Vec::new();
     }
@@ -90,11 +99,20 @@ pub fn extract_chunks(relative_path: &str, original: &str, opts: ExtractOptions)
     }]
 }
 
-fn map_original_to_normalized_lines(original: &str, tab_width: usize) -> Vec<(u32, String)> {
-    let width = tab_width.max(1);
+fn map_original_to_normalized_lines(
+    relative_path: &str,
+    original: &str,
+    opts: ExtractOptions,
+) -> Vec<(u32, String)> {
+    let width = opts.tab_width.max(1);
+    let labels = label_lines(relative_path, original);
     let mut out = Vec::new();
     for (idx, line) in original.split('\n').enumerate() {
         let line_no = (idx + 1) as u32;
+        let label = labels.get(idx).copied().unwrap_or(LineLabel::Code);
+        if !should_include(label, opts) {
+            continue;
+        }
         if !line.is_ascii() {
             continue;
         }
@@ -102,6 +120,15 @@ fn map_original_to_normalized_lines(original: &str, tab_width: usize) -> Vec<(u3
         out.push((line_no, expanded.trim_end().to_string()));
     }
     out
+}
+
+fn should_include(label: LineLabel, opts: ExtractOptions) -> bool {
+    match label {
+        LineLabel::Code => true,
+        LineLabel::Import => opts.include_imports,
+        LineLabel::Doc => opts.include_doc_comments,
+        LineLabel::Comment => opts.include_comments,
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +191,31 @@ mod tests {
         let chunks = extract_chunks("f.rs", "fn main() {}\n", ExtractOptions::default());
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].hash, hash_normalized(&chunks[0].normalized));
+    }
+
+    #[test]
+    fn filters_imports_and_comments_before_normalizing() {
+        let source = "use crate::thing;\n/// docs\n// note\nfn main() {}\n";
+        let chunks = extract_chunks("f.rs", source, ExtractOptions::default());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].normalized, "/// docs\nfn main() {}\n");
+
+        let chunks = extract_chunks(
+            "f.rs",
+            source,
+            ExtractOptions {
+                include_imports: true,
+                include_comments: true,
+                ..ExtractOptions::default()
+            },
+        );
+        assert_eq!(chunks[0].normalized, source);
+    }
+
+    #[test]
+    fn all_filtered_lines_produce_no_chunk() {
+        let source = "use crate::thing;\n// note\n";
+        let chunks = extract_chunks("f.rs", source, ExtractOptions::default());
+        assert!(chunks.is_empty());
     }
 }

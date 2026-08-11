@@ -37,6 +37,8 @@ pub struct TreeView {
     pub recommend: Option<String>,
     pub title: String,
     pub collapsed: std::collections::HashSet<String>,
+    /// Dependency traversal order, when dependency mode is active.
+    pub dependency_order: Option<Vec<String>>,
     /// Repository-wide `(completed, total)` normalized line counts.
     pub overall: (usize, usize),
     pub hide_skipped: bool,
@@ -44,7 +46,16 @@ pub struct TreeView {
 
 impl TreeView {
     pub fn from_progress(repo_name: &str, progress: &RepoProgress, hide_skipped: bool) -> Self {
-        let recommend = progress.recommend_path().map(str::to_string);
+        Self::from_progress_with_order(repo_name, progress, hide_skipped, None)
+    }
+
+    pub fn from_progress_with_order(
+        repo_name: &str,
+        progress: &RepoProgress,
+        hide_skipped: bool,
+        dependency_order: Option<Vec<String>>,
+    ) -> Self {
+        let recommend = recommended_path(progress, dependency_order.as_deref());
         let rows = flatten(progress, &std::collections::HashSet::new(), hide_skipped);
         Self {
             rows,
@@ -52,13 +63,14 @@ impl TreeView {
             recommend,
             title: repo_name.to_string(),
             collapsed: std::collections::HashSet::new(),
+            dependency_order,
             overall: overall_progress(progress),
             hide_skipped,
         }
     }
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
-        self.recommend = progress.recommend_path().map(str::to_string);
+        self.recommend = recommended_path(progress, self.dependency_order.as_deref());
         self.overall = overall_progress(progress);
         let prev_path = self.selected_file_path();
         self.rows = flatten(progress, &self.collapsed, self.hide_skipped);
@@ -75,6 +87,22 @@ impl TreeView {
         } else {
             self.selected = self.selected.min(self.rows.len().saturating_sub(1));
         }
+    }
+
+    pub fn set_dependency_order(
+        &mut self,
+        progress: &RepoProgress,
+        dependency_order: Option<Vec<String>>,
+    ) {
+        self.dependency_order = dependency_order;
+        self.refresh_rows(progress);
+    }
+
+    pub fn dependency_order_number(&self, path: &str) -> Option<usize> {
+        self.dependency_order
+            .as_ref()
+            .and_then(|order| order.iter().position(|item| item == path))
+            .map(|index| index + 1)
     }
 
     pub fn move_by(&mut self, delta: isize) {
@@ -111,6 +139,23 @@ impl TreeView {
 fn overall_progress(progress: &RepoProgress) -> (usize, usize) {
     let root = directory_progress(progress, "");
     (root.completed_lines, root.total_lines)
+}
+
+fn recommended_path(
+    progress: &RepoProgress,
+    dependency_order: Option<&[String]>,
+) -> Option<String> {
+    if let Some(order) = dependency_order {
+        return order.iter().find_map(|path| {
+            progress
+                .files
+                .iter()
+                .find(|file| file.relative_path == *path)
+                .filter(|file| file.derive_status() == FileStatus::Todo)
+                .map(|_| path.clone())
+        });
+    }
+    progress.recommend_path().map(str::to_string)
 }
 
 fn flatten(
@@ -256,12 +301,22 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
 
     // Footer: key hints.
     frame.render_widget(
-        Paragraph::new(theme::key_hints(&[
-            ("j/k", "move"),
-            ("Enter", "open"),
-            ("Space", "fold"),
-            ("q/Esc", "quit"),
-        ])),
+        Paragraph::new(theme::key_hints(if view.dependency_order.is_some() {
+            &[
+                ("j/k", "move"),
+                ("Enter", "open"),
+                ("e", "set entry"),
+                ("Space", "fold"),
+                ("q/Esc", "quit"),
+            ]
+        } else {
+            &[
+                ("j/k", "move"),
+                ("Enter", "open"),
+                ("Space", "fold"),
+                ("q/Esc", "quit"),
+            ]
+        })),
         panes[3],
     );
 }
@@ -295,6 +350,12 @@ fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
             }
         }
         TreeRowKind::File { path } => {
+            if let Some(number) = view.dependency_order_number(path) {
+                spans.push(Span::styled(
+                    format!("{number:>3} "),
+                    Style::default().fg(theme::CYAN),
+                ));
+            }
             let status = row.status.unwrap_or(FileStatus::Todo);
             let (mark, mark_color, name_color) = match status {
                 FileStatus::Done => ("✓", theme::GREEN, theme::MUTED),

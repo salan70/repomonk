@@ -7,9 +7,11 @@ use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::config::{save as save_user_config, UserConfig};
+use crate::config::{DependencyDirection, ProgressMode};
 use crate::domain::content::{
     ChunkCompletion, FileStatus, RepoProgress, ResolvedRepository, SessionSummary, TypingMetrics,
 };
+use crate::domain::dependency::{order_files, uses_dependency_mode};
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
 use crate::scan::extract::ExtractOptions;
 use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
@@ -69,6 +71,17 @@ struct RepoSession {
     session_started_at: String,
     result: Option<ResultView>,
     single_file: Option<String>,
+    import_edges: Vec<(String, String)>,
+    dependency_direction: DependencyDirection,
+    dependency_mode: bool,
+    entry_override: Option<String>,
+    ordered_paths: Option<Vec<String>>,
+}
+
+struct DependencySettings {
+    import_edges: Vec<(String, String)>,
+    mode: ProgressMode,
+    direction: DependencyDirection,
 }
 
 pub struct App {
@@ -483,6 +496,23 @@ impl App {
                 }
                 Ok(false)
             }
+            KeyCode::Char('e') => {
+                if let Some(s) = &mut self.session {
+                    if s.dependency_mode {
+                        if let Some(path) = s.tree.selected_file_path() {
+                            let is_typeable = s.progress.files.iter().any(|file| {
+                                file.relative_path == path
+                                    && file.derive_status() != FileStatus::Skipped
+                            });
+                            if is_typeable {
+                                s.entry_override = Some(path);
+                                s.recompute_dependency_order();
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            }
             KeyCode::Enter => {
                 let path = self
                     .session
@@ -738,6 +768,7 @@ fn load_session(
                     .unwrap_or_default();
                 let mut resolved_root = resolved.clone();
                 resolved_root.root = parent;
+                let import_edges = scan.import_edges.clone();
                 let (repo_id, progress) = store.sync_scan(
                     &resolved_root,
                     &scan,
@@ -755,6 +786,11 @@ fn load_session(
                     repo_id,
                     progress,
                     Some(name),
+                    DependencySettings {
+                        import_edges,
+                        mode: cfg.user.progress.mode,
+                        direction: cfg.user.progress.dependency_direction,
+                    },
                     cfg.user.progress.hide_skipped,
                 ));
             }
@@ -773,11 +809,17 @@ fn load_session(
         &scan,
         cfg.user.progress.keep_done_on_refresh,
     )?;
+    let import_edges = scan.import_edges.clone();
     Ok(RepoSession::from_parts(
         progress_repo,
         repo_id,
         progress,
         single_file,
+        DependencySettings {
+            import_edges,
+            mode: cfg.user.progress.mode,
+            direction: cfg.user.progress.dependency_direction,
+        },
         cfg.user.progress.hide_skipped,
     ))
 }
@@ -790,6 +832,9 @@ fn walk_options(user: &UserConfig) -> WalkOptions {
         include_configs: user.content.include_configs,
         extract: ExtractOptions {
             tab_width: user.content.tab_width.max(1),
+            include_imports: user.content.include_imports,
+            include_doc_comments: user.content.include_doc_comments,
+            include_comments: user.content.include_comments,
         },
     }
 }
@@ -800,9 +845,31 @@ impl RepoSession {
         repo_id: i64,
         progress: RepoProgress,
         single_file: Option<String>,
+        dependency: DependencySettings,
         hide_skipped: bool,
     ) -> Self {
-        let tree = TreeView::from_progress(&repo.display_name, &progress, hide_skipped);
+        let dependency_mode = uses_dependency_mode(dependency.mode)
+            && !dependency.import_edges.is_empty()
+            && progress
+                .files
+                .iter()
+                .filter(|file| file.derive_status() != FileStatus::Skipped)
+                .count()
+                > 1;
+        let ordered_paths = dependency_mode.then(|| {
+            dependency_order(
+                &progress,
+                &dependency.import_edges,
+                dependency.direction,
+                None,
+            )
+        });
+        let tree = TreeView::from_progress_with_order(
+            &repo.display_name,
+            &progress,
+            hide_skipped,
+            ordered_paths.clone(),
+        );
         Self {
             repo,
             repo_id,
@@ -815,8 +882,60 @@ impl RepoSession {
             session_started_at: String::new(),
             result: None,
             single_file,
+            import_edges: dependency.import_edges,
+            dependency_direction: dependency.direction,
+            dependency_mode,
+            entry_override: None,
+            ordered_paths,
         }
     }
+
+    fn recompute_dependency_order(&mut self) {
+        let order = if self.dependency_mode {
+            Some(dependency_order(
+                &self.progress,
+                &self.import_edges,
+                self.dependency_direction,
+                self.entry_override.as_deref(),
+            ))
+        } else {
+            None
+        };
+        self.ordered_paths = order.clone();
+        self.tree.set_dependency_order(&self.progress, order);
+    }
+}
+
+fn dependency_order(
+    progress: &RepoProgress,
+    edges: &[(String, String)],
+    direction: DependencyDirection,
+    entry_override: Option<&str>,
+) -> Vec<String> {
+    let mut typeable_paths: Vec<String> = progress
+        .files
+        .iter()
+        .filter(|file| file.derive_status() != FileStatus::Skipped)
+        .map(|file| file.relative_path.clone())
+        .collect();
+    typeable_paths.sort();
+    typeable_paths.dedup();
+
+    let entry = entry_override.or_else(|| most_imported_path(edges, &typeable_paths));
+    order_files(edges, entry, direction, &typeable_paths)
+}
+
+fn most_imported_path<'a>(edges: &[(String, String)], paths: &'a [String]) -> Option<&'a str> {
+    let mut best: Option<&String> = None;
+    let mut best_count = 0usize;
+    for path in paths {
+        let count = edges.iter().filter(|(_, target)| target == path).count();
+        if count > best_count {
+            best = Some(path);
+            best_count = count;
+        }
+    }
+    best.map(String::as_str)
 }
 
 fn now_millis() -> u64 {
@@ -831,6 +950,15 @@ pub mod headless {
     use super::*;
 
     pub fn open_local(path: &str, db: &Path, cache: &Path) -> crate::Result<App> {
+        open_local_with_user_config(path, db, cache, UserConfig::default())
+    }
+
+    pub fn open_local_with_user_config(
+        path: &str,
+        db: &Path,
+        cache: &Path,
+        user: UserConfig,
+    ) -> crate::Result<App> {
         App::open(
             path,
             &AppConfig {
@@ -838,7 +966,7 @@ pub mod headless {
                 db_path: db.to_path_buf(),
                 refresh: false,
                 no_fx: true,
-                user: UserConfig::default(),
+                user,
                 config_path: cache.join("test-config.toml"),
             },
         )

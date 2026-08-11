@@ -147,3 +147,49 @@ fn parses_github_refs() {
     assert!(parse_github_input("https://github.com/salan70/repomonk").is_some());
     assert!(parse_github_input("salan70/repomonk").is_some());
 }
+
+#[test]
+fn line_filter_settings_change_extracted_body() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "use crate::dep;\n/// docs\n// note\nfn main() {}\n",
+    )
+    .unwrap();
+
+    let default_scan = scan_repository(dir.path(), WalkOptions::default()).unwrap();
+    let default_body = &default_scan.files[0].chunks[0].normalized;
+    assert_eq!(default_body, "/// docs\nfn main() {}\n");
+
+    let mut options = WalkOptions::default();
+    options.extract.include_imports = true;
+    options.extract.include_comments = true;
+    let all_scan = scan_repository(dir.path(), options).unwrap();
+    assert_eq!(
+        all_scan.files[0].chunks[0].normalized,
+        "use crate::dep;\n/// docs\n// note\nfn main() {}\n"
+    );
+}
+
+#[test]
+fn scan_collects_repository_local_dependency_edges() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/main.ts"),
+        "import { dep } from './dep';\nexport const main = dep;\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/dep.ts"), "export const dep = 1;\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/unrelated.ts"),
+        "export const unrelated = 2;\n",
+    )
+    .unwrap();
+
+    let scan = scan_repository(dir.path(), WalkOptions::default()).unwrap();
+    assert_eq!(
+        scan.import_edges,
+        vec![("src/main.ts".into(), "src/dep.ts".into())]
+    );
+}

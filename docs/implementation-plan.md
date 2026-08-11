@@ -38,8 +38,8 @@ URL / ローカルrepo
 ## 3. MVPに含めないもの
 
 - Prepare進捗画面、`--last`、`stats`サブコマンド
-- tree-sitterと言語別行ラベル、import・コメントの設定フィルタ
-- dependency / directoryモードと依存グラフ
+- tree-sitterと言語別行ラベル、import・コメントの設定フィルタ（→ 実装済み。D-016）
+- dependency / directoryモードと依存グラフ（dependencyのみ実装済み。D-016）
 - 手動skip、ツリー内検索、絞り込み、ソート切り替え
 - 変更マーク、消えたファイル履歴などrefreshの詳細UI
 - フル統計画面（草、速度ヒートマップ、2-gram、詳細なミス分析）

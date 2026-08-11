@@ -263,7 +263,7 @@ Treeへ飛ばされて仕様の画面役割とずれるためです。
 
 ## D-015: config.toml と TUI Settings
 
-- 状態: 採用
+- 状態: 置換済み（D-016へ）
 - 日付: 2026-08-12
 
 ### 決定
@@ -279,9 +279,42 @@ Treeへ飛ばされて仕様の画面役割とずれるためです。
 - 設定変更の反映は次回リポジトリオープン／次回写経開始から（開いているセッションの再走査はしない）。
 - `--no-fx`は`config.toml`の`[fx]`より優先するセッション上書き。
 
+行ラベルとdependency設定の結線範囲は、後続のD-016で拡張した。
+
 ### 理由
 
 仕様書§8とプロダクト要件§11の設定面を、TUIから変更できる体験として提供するためです。
+
+## D-016: 行ラベルとdependency進行を設定へ結線する
+
+- 状態: 採用
+- 日付: 2026-08-12
+
+### 決定
+
+- `include_imports`、`include_doc_comments`、`include_comments`は、正規化前に
+  行ラベルを付けてから除外する。codeとコメントが混在する行はcodeとして残し、
+  それ以外はimport、doc、commentの順で分類する。
+- 行ラベルはtree-sitterを既定有効にし、Rust、TypeScript、TSX、JavaScript、
+  Python、Goを対象にする。パーサが使えない言語または解析に失敗した場合は、
+  行頭規則によるフォールバックを使う。
+- `progress.mode = "dependency"`では、Rust、TypeScript/JavaScript、Pythonの
+  リポジトリ内相対importから依存順を毎回計算する。未解決・外部importは無視し、
+  グラフが空の場合はmanualのパス順へフォールバックする。
+- entryは被参照数が最多のtypeableファイルを既定とし、Treeで`e`を押すと選択中の
+  typeableファイルをセッション内のentryとして再計算する。Prepare画面は追加しない。
+- `top_down`はpre-order DFS、`bottom_up`はpost-order DFSとする。importの出現順を
+  兄弟順とし、循環は訪問済みで停止し、未到達ファイルはパス順で末尾へ追加する。
+- dependency順序はSQLiteへ保存せず、リポジトリを開くたびに再計算する。完了後に
+  別ファイルを自動開始せず、完了後は従来どおりTreeへ戻る。
+- 上記5キーはSettingsのunsupported表示を外し、`auto_close_brackets`のlocked表示は
+  維持する。
+
+### 理由
+
+Settingsに存在する抽出・進行設定を保存だけで終わらせず、既存のScan、Domain、App、
+Tree境界へ結線するためです。依存順を保存しないことで、refresh後も現在の本文と
+設定から一貫した順序を導出できます。
 
 ## 未決定
 

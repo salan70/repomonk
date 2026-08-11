@@ -729,6 +729,7 @@ mod tests {
                 skip_reason: None,
                 chunks: vec![sample_chunk("src/main.rs", body)],
             }],
+            import_edges: Vec::new(),
         };
         let (repo_id, progress) = store.sync_scan(&repo, &scan, true).unwrap();
         let chunk_id = progress.files[0].chunks[0].id.unwrap();
@@ -764,6 +765,7 @@ mod tests {
                     normalized: body.into(),
                 }],
             }],
+            import_edges: Vec::new(),
         };
         // Wait — hash of body2 normalized lines differ. Use same normalized hash explicitly.
         let _ = body2;
@@ -803,6 +805,7 @@ mod tests {
                 skip_reason: None,
                 chunks: vec![sample_chunk("src/main.rs", body)],
             }],
+            import_edges: Vec::new(),
         };
         let older = ResolvedRepository {
             identity: "local:/tmp/older".into(),
@@ -850,6 +853,7 @@ mod tests {
                 skip_reason: None,
                 chunks: vec![sample_chunk("src/main.rs", body)],
             }],
+            import_edges: Vec::new(),
         };
         let (_, progress) = store.sync_scan(&repo, &scan, true).unwrap();
         let chunk_id = progress.files[0].chunks[0].id.unwrap();

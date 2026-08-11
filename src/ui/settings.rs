@@ -56,21 +56,21 @@ const SETTINGS: &[SettingDef] = &[
         section: "content",
         label: "include_imports",
         kind: SettingKind::Bool,
-        unsupported: true,
+        unsupported: false,
     },
     SettingDef {
         id: SettingId::IncludeDocComments,
         section: "content",
         label: "include_doc_comments",
         kind: SettingKind::Bool,
-        unsupported: true,
+        unsupported: false,
     },
     SettingDef {
         id: SettingId::IncludeComments,
         section: "content",
         label: "include_comments",
         kind: SettingKind::Bool,
-        unsupported: true,
+        unsupported: false,
     },
     SettingDef {
         id: SettingId::IncludeTests,
@@ -126,14 +126,14 @@ const SETTINGS: &[SettingDef] = &[
         section: "progress",
         label: "mode",
         kind: SettingKind::ProgressMode,
-        unsupported: true,
+        unsupported: false,
     },
     SettingDef {
         id: SettingId::DependencyDirection,
         section: "progress",
         label: "dependency_direction",
         kind: SettingKind::DependencyDirection,
-        unsupported: true,
+        unsupported: false,
     },
     SettingDef {
         id: SettingId::KeepDoneOnRefresh,
@@ -244,9 +244,6 @@ impl SettingsView {
             }
             SettingId::ProgressMode => {
                 cfg.progress.mode = cfg.progress.mode.cycle();
-                if matches!(cfg.progress.mode, crate::config::ProgressMode::Dependency) {
-                    self.status = Some("dependency mode is not implemented yet (saved)".into());
-                }
             }
             SettingId::DependencyDirection => {
                 cfg.progress.dependency_direction = if forward {

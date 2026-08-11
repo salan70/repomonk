@@ -87,6 +87,8 @@ pub struct ScannedFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanResult {
     pub files: Vec<ScannedFile>,
+    /// Resolved repository-local imports as `(importer, imported)` paths.
+    pub import_edges: Vec<(String, String)>,
 }
 
 impl ScanResult {

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::domain::content::{FileStatus, ScanResult, ScannedFile, SkipReason};
+use crate::scan::deps::collect_edges;
 use crate::scan::extract::{extract_chunks, ExtractOptions};
 
 /// Limits used for automatic exclusion.
@@ -116,7 +117,11 @@ pub fn scan_repository(root: &Path, opts: WalkOptions) -> crate::Result<ScanResu
     let mut files = Vec::new();
     walk_dir(root, root, &opts, &mut files)?;
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    Ok(ScanResult { files })
+    let import_edges = collect_edges(root, &files);
+    Ok(ScanResult {
+        files,
+        import_edges,
+    })
 }
 
 fn walk_dir(
@@ -329,6 +334,7 @@ pub fn single_file_scan(file: &Path, opts: WalkOptions) -> crate::Result<(PathBu
         parent,
         ScanResult {
             files: vec![scanned],
+            import_edges: Vec::new(),
         },
     ))
 }

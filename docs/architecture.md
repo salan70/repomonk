@@ -25,6 +25,7 @@ src/
   app/                 画面遷移とユースケース
   domain/
     content.rs         正規化済み本文、ファイル単位、対象外理由
+    dependency.rs      依存グラフからの純粋な打鍵順序計算
     typing.rs          I/O非依存の打鍵状態機械と計測
     progress.rs        行数ベース進捗集計の純粋ロジック
   source/
@@ -33,6 +34,9 @@ src/
   scan/
     walk.rs            ファイル走査と自動除外
     extract.rs         正規化とファイル本文抽出
+    language.rs        拡張子からの言語判定
+    label.rs           行ラベルと設定フィルタ
+    deps/              リポジトリ内importの抽出・解決
   store/
     sqlite.rs          スキーマ、進捗・セッション保存
   ui/
@@ -144,6 +148,6 @@ Escapeでは中断セッションだけを記録し、ファイル完了を更�
 
 ## 8. 将来拡張
 
-tree-sitterによるラベル、dependencyモード、統計、演出は既存境界の実装追加として
-導入します。MVPの打鍵エンジン、ファイル本文ID、行数進捗集計を作り直さずに
-拡張できることを設計上の目標とします。
+統計やPrepare画面などの残る機能も既存境界へ実装追加します。tree-sitterによる
+ラベルとdependencyモードはD-016で追加済みです。MVPの打鍵エンジン、ファイル本文ID、
+行数進捗集計を作り直さずに拡張できることを設計上の目標とします。
