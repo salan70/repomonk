@@ -23,7 +23,7 @@ pub enum Error {
     #[error("git failed: {0}")]
     Git(String),
 
-    #[error("no typeable chunks found in repository")]
+    #[error("no typeable content found in repository")]
     NoChunks,
 
     #[error("database error: {0}")]

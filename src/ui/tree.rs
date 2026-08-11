@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::domain::content::{FileStatus, RepoProgress};
-use crate::domain::progress::{directory_progress, is_partial};
+use crate::domain::progress::directory_progress;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeRowKind {
@@ -135,8 +135,8 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
                 if !emitted_dirs.contains(&acc) {
                     let dprog = directory_progress(progress, &acc);
                     let label = format!(
-                        "{}/  [{}/{} chunks]",
-                        part, dprog.completed_chunks, dprog.total_chunks
+                        "{}/  [{}/{} lines]",
+                        part, dprog.completed_lines, dprog.total_lines
                     );
                     rows.push(TreeRow {
                         kind: TreeRowKind::Dir { path: acc.clone() },
@@ -153,7 +153,6 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
                 let mark = match status {
                     FileStatus::Done => "✓",
                     FileStatus::Skipped => "·",
-                    FileStatus::Todo if is_partial(f) => "…",
                     FileStatus::Todo => "○",
                 };
                 let mut label = format!("{mark} {part}");
@@ -162,11 +161,7 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
                         label.push_str(&format!("  ({})", reason.as_str()));
                     }
                 } else {
-                    label.push_str(&format!(
-                        "  [{}/{}]",
-                        f.completed_chunks(),
-                        f.total_chunks()
-                    ));
+                    label.push_str(&format!("  [{}/{}]", f.completed_lines(), f.total_lines()));
                 }
                 rows.push(TreeRow {
                     kind: TreeRowKind::File {
@@ -226,81 +221,4 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     if help_area.y > area.y {
         frame.render_widget(help, help_area);
     }
-}
-
-/// Chunk picker rows for a single file.
-#[derive(Debug, Clone)]
-pub struct ChunkListView {
-    pub path: String,
-    pub labels: Vec<String>,
-    pub selected: usize,
-    pub chunk_ids: Vec<Option<i64>>,
-}
-
-impl ChunkListView {
-    pub fn from_file(file: &crate::domain::content::FileProgress) -> Self {
-        let labels = file
-            .chunks
-            .iter()
-            .map(|c| {
-                let mark = match c.completion {
-                    crate::domain::content::ChunkCompletion::Complete => "✓",
-                    crate::domain::content::ChunkCompletion::Incomplete => "○",
-                };
-                format!(
-                    "{mark} lines {}–{}  ({})",
-                    c.chunk.start_line,
-                    c.chunk.end_line,
-                    &c.chunk.hash[..8.min(c.chunk.hash.len())]
-                )
-            })
-            .collect();
-        let chunk_ids = file.chunks.iter().map(|c| c.id).collect();
-        let selected = file
-            .chunks
-            .iter()
-            .position(|c| c.completion == crate::domain::content::ChunkCompletion::Incomplete)
-            .unwrap_or(0);
-        Self {
-            path: file.relative_path.clone(),
-            labels,
-            selected,
-            chunk_ids,
-        }
-    }
-
-    pub fn move_by(&mut self, delta: isize) {
-        if self.labels.is_empty() {
-            return;
-        }
-        let len = self.labels.len() as isize;
-        self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
-    }
-}
-
-pub fn draw_chunk_list(frame: &mut Frame, area: Rect, view: &ChunkListView) {
-    let block = Block::default()
-        .title(format!(" {} ", view.path))
-        .borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let items: Vec<ListItem> = view
-        .labels
-        .iter()
-        .enumerate()
-        .map(|(idx, label)| {
-            let style = if idx == view.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(Span::styled(label.clone(), style)))
-        })
-        .collect();
-    let mut state = ListState::default();
-    if !view.labels.is_empty() {
-        state.select(Some(view.selected));
-    }
-    frame.render_stateful_widget(List::new(items), inner, &mut state);
 }

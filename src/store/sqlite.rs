@@ -413,7 +413,7 @@ fn parse_skip_reason(raw: &str) -> SkipReason {
         SkipReason::GeneratedOrLockFile
     } else if raw == "binary file" {
         SkipReason::Binary
-    } else if raw == "no typeable chunks" {
+    } else if raw == "no typeable chunks" || raw == "no typeable content" {
         SkipReason::NoChunks
     } else if let Some(rest) = raw.strip_prefix("line longer than ") {
         let max_cols = rest

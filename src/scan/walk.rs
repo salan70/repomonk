@@ -268,7 +268,7 @@ mod tests {
             .find(|f| f.relative_path == "src/lib.rs")
             .unwrap();
         assert_eq!(lib.status, FileStatus::Todo);
-        assert!(!lib.chunks.is_empty());
+        assert_eq!(lib.chunks.len(), 1);
 
         let lock = result
             .files

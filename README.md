@@ -20,9 +20,9 @@ cargo run -- --purge
 
 操作の目安:
 
-- Tree: `j`/`k` 移動、Enter で開く、Space で折りたたみ、`q`/Esc で終了
+- Tree: `j`/`k` 移動、Enter でファイルを開いて写経、Space で折りたたみ、`q`/Esc で終了
 - Typing: 正しいキーのみ受理、Backspace、Esc で中断
-- Result: Enter/Esc で Tree へ、`r` で同ファイルの次チャンク（残っている場合）
+- Result: Enter/Esc で Tree へ戻る
 
 ## ドキュメント
 

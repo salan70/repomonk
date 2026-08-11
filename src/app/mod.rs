@@ -1,4 +1,4 @@
-//! Application state machine: Tree → Chunks → Typing → Result.
+//! Application state machine: Tree → Typing → Result.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,14 +15,13 @@ use crate::source::resolve_source;
 use crate::store::SqliteStore;
 use crate::ui::result::{draw_result, ResultView};
 use crate::ui::terminal::TerminalGuard;
-use crate::ui::tree::{draw_chunk_list, draw_tree, ChunkListView, TreeView};
+use crate::ui::tree::{draw_tree, TreeView};
 use crate::ui::typing::draw_typing;
 use crate::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Tree,
-    Chunks,
     Typing,
     Result,
 }
@@ -40,7 +39,6 @@ pub struct App {
     progress: RepoProgress,
     store: SqliteStore,
     tree: TreeView,
-    chunks: Option<ChunkListView>,
     screen: Screen,
     engine: Option<TypingEngine>,
     typing_path: String,
@@ -122,7 +120,6 @@ impl App {
             progress,
             store,
             tree,
-            chunks: None,
             screen: Screen::Tree,
             engine: None,
             typing_path: String::new(),
@@ -151,11 +148,6 @@ impl App {
                     let area = frame.area();
                     match self.screen {
                         Screen::Tree => draw_tree(frame, area, &self.tree),
-                        Screen::Chunks => {
-                            if let Some(view) = &self.chunks {
-                                draw_chunk_list(frame, area, view);
-                            }
-                        }
                         Screen::Typing => {
                             if let Some(engine) = &self.engine {
                                 draw_typing(
@@ -218,7 +210,6 @@ impl App {
 
         match self.screen {
             Screen::Tree => self.handle_tree_key(key),
-            Screen::Chunks => self.handle_chunks_key(key),
             Screen::Typing => self.handle_typing_key(key),
             Screen::Result => self.handle_result_key(key),
         }
@@ -243,38 +234,6 @@ impl App {
             KeyCode::Enter => {
                 if let Some(path) = self.tree.selected_file_path() {
                     self.open_file(&path)?;
-                }
-                Ok(false)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    fn handle_chunks_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
-        match key.code {
-            KeyCode::Char('q') => Ok(true),
-            KeyCode::Esc => {
-                self.screen = Screen::Tree;
-                self.chunks = None;
-                Ok(false)
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if let Some(c) = &mut self.chunks {
-                    c.move_by(1);
-                }
-                Ok(false)
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if let Some(c) = &mut self.chunks {
-                    c.move_by(-1);
-                }
-                Ok(false)
-            }
-            KeyCode::Enter => {
-                if let Some(view) = &self.chunks {
-                    let idx = view.selected;
-                    let path = view.path.clone();
-                    self.start_chunk(&path, idx)?;
                 }
                 Ok(false)
             }
@@ -307,31 +266,7 @@ impl App {
     fn handle_result_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         match key.code {
             KeyCode::Char('q') => Ok(true),
-            KeyCode::Esc | KeyCode::Enter => {
-                self.result = None;
-                self.screen = Screen::Tree;
-                self.tree.refresh_rows(&self.progress);
-                Ok(false)
-            }
-            KeyCode::Char('r') => {
-                if let Some(view) = &self.result {
-                    if view.completed && view.has_next_chunk {
-                        let path = view.path.clone();
-                        if let Some(file) =
-                            self.progress.files.iter().find(|f| f.relative_path == path)
-                        {
-                            if let Some((idx, _)) = file
-                                .chunks
-                                .iter()
-                                .enumerate()
-                                .find(|(_, c)| c.completion == ChunkCompletion::Incomplete)
-                            {
-                                self.start_chunk(&path, idx)?;
-                                return Ok(false);
-                            }
-                        }
-                    }
-                }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('r') => {
                 self.result = None;
                 self.screen = Screen::Tree;
                 self.tree.refresh_rows(&self.progress);
@@ -351,24 +286,15 @@ impl App {
         if file.derive_status() == FileStatus::Skipped {
             return Ok(());
         }
-        // If only one incomplete chunk, start directly; else show list.
-        let incomplete: Vec<_> = file
-            .chunks
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.completion == ChunkCompletion::Incomplete)
-            .collect();
-        if incomplete.len() == 1 {
-            let idx = incomplete[0].0;
-            self.start_chunk(path, idx)?;
-        } else {
-            self.chunks = Some(ChunkListView::from_file(file));
-            self.screen = Screen::Chunks;
+        if file.chunks.is_empty() {
+            return Ok(());
         }
+        // File-unit typing: always open the sole body (re-challenge allowed).
+        self.start_file(path, 0)?;
         Ok(())
     }
 
-    fn start_chunk(&mut self, path: &str, idx: usize) -> crate::Result<()> {
+    fn start_file(&mut self, path: &str, idx: usize) -> crate::Result<()> {
         let file = self
             .progress
             .files
@@ -378,10 +304,10 @@ impl App {
         let cp = file
             .chunks
             .get(idx)
-            .ok_or_else(|| Error::Message("chunk index out of range".into()))?;
+            .ok_or_else(|| Error::Message("file body missing".into()))?;
         let chunk_id = cp
             .id
-            .ok_or_else(|| Error::Message("chunk missing database id".into()))?;
+            .ok_or_else(|| Error::Message("file body missing database id".into()))?;
 
         let started_ms = now_millis();
         self.engine = Some(TypingEngine::new(&cp.chunk.normalized, started_ms, true, 4));
@@ -389,7 +315,6 @@ impl App {
         self.typing_chunk_label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
         self.typing_chunk_id = chunk_id;
         self.session_started_at = Utc::now().to_rfc3339();
-        self.chunks = None;
         self.result = None;
         self.screen = Screen::Typing;
 
@@ -440,19 +365,11 @@ impl App {
             }
         }
 
-        let file = self
+        let file_done = self
             .progress
             .files
             .iter()
-            .find(|f| f.relative_path == self.typing_path);
-        let has_next = file
-            .map(|f| {
-                f.chunks
-                    .iter()
-                    .any(|c| c.completion == ChunkCompletion::Incomplete)
-            })
-            .unwrap_or(false);
-        let file_done = file
+            .find(|f| f.relative_path == self.typing_path)
             .map(|f| f.derive_status() == FileStatus::Done)
             .unwrap_or(false);
 
@@ -460,7 +377,6 @@ impl App {
             path: self.typing_path.clone(),
             completed,
             metrics,
-            has_next_chunk: has_next,
             file_done,
         });
         self.screen = Screen::Result;
@@ -476,7 +392,7 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Headless helper for integration tests: open, complete first chunk programmatically.
+/// Headless helper for integration tests: open, complete first file programmatically.
 pub mod headless {
     use super::*;
 
@@ -497,19 +413,8 @@ pub mod headless {
             .recommend_path()
             .ok_or_else(|| Error::NoChunks)?
             .to_string();
-        let idx = app
-            .progress
-            .files
-            .iter()
-            .find(|f| f.relative_path == path)
-            .and_then(|f| {
-                f.chunks
-                    .iter()
-                    .position(|c| c.completion == ChunkCompletion::Incomplete)
-            })
-            .ok_or_else(|| Error::NoChunks)?;
-        app.start_chunk(&path, idx)?;
-        // `start_chunk` may already finish empty/auto-completed chunks.
+        app.start_file(&path, 0)?;
+        // `start_file` may already finish empty/auto-completed bodies.
         if app.engine.is_none() {
             return Ok(app
                 .result
