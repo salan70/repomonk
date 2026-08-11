@@ -16,6 +16,7 @@ pub enum SettingKind {
     ProgressMode,
     DependencyDirection,
     FxIntensity,
+    FxPreset,
     /// Display-only / locked (cannot change).
     Locked,
 }
@@ -38,6 +39,7 @@ pub enum SettingId {
     HideSkipped,
     FxEnabled,
     FxIntensity,
+    FxPreset,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,6 +165,13 @@ const SETTINGS: &[SettingDef] = &[
         kind: SettingKind::FxIntensity,
         unsupported: false,
     },
+    SettingDef {
+        id: SettingId::FxPreset,
+        section: "fx",
+        label: "preset",
+        kind: SettingKind::FxPreset,
+        unsupported: false,
+    },
 ];
 
 #[derive(Debug, Clone)]
@@ -269,6 +278,13 @@ impl SettingsView {
                     cfg.fx.intensity.cycle_prev()
                 };
             }
+            SettingId::FxPreset => {
+                cfg.fx.preset = if forward {
+                    cfg.fx.preset.cycle_next()
+                } else {
+                    cfg.fx.preset.cycle_prev()
+                };
+            }
         }
         true
     }
@@ -298,6 +314,7 @@ fn value_string(cfg: &UserConfig, id: SettingId) -> String {
         SettingId::HideSkipped => cfg.progress.hide_skipped.to_string(),
         SettingId::FxEnabled => cfg.fx.enabled.to_string(),
         SettingId::FxIntensity => cfg.fx.intensity.as_str().into(),
+        SettingId::FxPreset => cfg.fx.preset.as_str().into(),
     }
 }
 
@@ -404,4 +421,30 @@ pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &U
         ])),
         panes[3],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::FxPreset;
+
+    #[test]
+    fn fx_preset_setting_cycles_through_all_presets() {
+        let mut view = SettingsView::new();
+        view.selected = SETTINGS
+            .iter()
+            .position(|def| def.id == SettingId::FxPreset)
+            .expect("fx preset setting");
+        let mut cfg = UserConfig::default();
+
+        for expected in [
+            FxPreset::Blaze,
+            FxPreset::Smear,
+            FxPreset::Ripple,
+            FxPreset::Classic,
+        ] {
+            assert!(view.activate(&mut cfg, true));
+            assert_eq!(cfg.fx.preset, expected);
+        }
+    }
 }

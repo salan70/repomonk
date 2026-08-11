@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, Paragraph};
 use ratatui::Frame;
 
+use crate::config::FxPreset;
 use crate::domain::typing::TypingSnapshot;
 use crate::ui::fx::FxState;
 use crate::ui::theme;
@@ -167,6 +168,7 @@ fn render_body(
         .map(|until| now_ms < until)
         .unwrap_or(false);
     let tier = fx.map(|f| f.tier()).unwrap_or(0);
+    let preset = fx.map(|f| f.preset()).unwrap_or(FxPreset::Classic);
     let typed_auto = theme::lerp(theme::GREEN, theme::MUTED, 0.55);
 
     // Keep current line roughly centered.
@@ -188,22 +190,87 @@ fn render_body(
         for (col, &(idx, ch)) in line.iter().enumerate() {
             let display = if ch == '\n' { '↵' } else { ch };
             let auto = snap.auto_inserted.binary_search(&idx).is_ok();
+            let cursor_trail = fx.and_then(|state| state.cursor_trail_at(li, col, now_ms));
+            let ripple = if preset == FxPreset::Ripple {
+                fx.and_then(|state| state.ripple_at(li, col, now_ms))
+            } else {
+                None
+            };
+            let trail_color = match preset {
+                FxPreset::Blaze => theme::ORANGE,
+                FxPreset::Smear => theme::CYAN,
+                FxPreset::Classic => theme::YELLOW,
+                FxPreset::Ripple => theme::BLUE,
+            };
+            let bloom_color = match preset {
+                FxPreset::Blaze => theme::ORANGE,
+                FxPreset::Smear => theme::CYAN,
+                FxPreset::Classic | FxPreset::Ripple => theme::BRIGHT,
+            };
 
             let mut style = if idx < snap.cursor {
                 let mut fg = if auto { typed_auto } else { theme::GREEN };
                 if let Some(glow) = fx.and_then(|f| f.glow_intensity(idx, now_ms)) {
-                    fg = theme::lerp(fg, theme::BRIGHT, glow);
+                    let target = match preset {
+                        FxPreset::Blaze => theme::ORANGE,
+                        FxPreset::Smear => theme::CYAN,
+                        FxPreset::Classic | FxPreset::Ripple => theme::BRIGHT,
+                    };
+                    let strength = match preset {
+                        FxPreset::Blaze => (glow * 1.25 + tier as f32 * 0.05).clamp(0.0, 1.0),
+                        _ => glow,
+                    };
+                    fg = theme::lerp(fg, target, strength);
                 }
-                Style::default().fg(fg)
+                let mut style = Style::default().fg(fg);
+                if preset == FxPreset::Blaze
+                    && fx
+                        .and_then(|state| state.glow_intensity(idx, now_ms))
+                        .is_some_and(|glow| glow > 0.35)
+                {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                style
             } else if idx == snap.cursor {
-                let bg = if flash { theme::RED } else { tier_color(tier) };
+                let mut bg = if flash { theme::RED } else { tier_color(tier) };
+                if !flash {
+                    if let Some(ripple) = ripple {
+                        bg = theme::lerp(bg, theme::CYAN, ripple * 0.75);
+                    }
+                    if let Some(trail) = cursor_trail {
+                        bg = theme::lerp(bg, trail_color, trail * 0.9);
+                    }
+                    if let Some(bloom) = fx.map(|state| state.cursor_bloom(now_ms)) {
+                        bg = theme::lerp(bg, bloom_color, bloom * 0.95);
+                    }
+                }
                 Style::default()
                     .fg(theme::BG)
                     .bg(bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::MUTED)
+                let mut fg = theme::MUTED;
+                if let Some(ripple) = ripple {
+                    fg = theme::lerp(fg, theme::CYAN, ripple * 0.8);
+                }
+                if let Some(trail) = cursor_trail {
+                    fg = theme::lerp(fg, trail_color, trail * 0.9);
+                }
+                Style::default().fg(fg)
             };
+
+            if let Some(ripple) = ripple {
+                let base = style.fg.unwrap_or(theme::MUTED);
+                let ripple_color = if idx < snap.cursor {
+                    theme::CYAN
+                } else {
+                    theme::BLUE
+                };
+                style = style.fg(theme::lerp(base, ripple_color, ripple));
+                if ripple > 0.78 && idx != snap.cursor {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+            }
 
             // Lightning-like sweep across a just-completed line.
             if let Some((progress, intensity)) = trail {

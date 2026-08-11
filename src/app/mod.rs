@@ -112,7 +112,7 @@ impl App {
             stats: None,
             settings: SettingsView::new(),
             session: Some(session),
-            fx: FxState::with_intensity(cfg.user.fx.intensity),
+            fx: FxState::with_config(cfg.user.fx.intensity, cfg.user.fx.preset),
             splash_started: None,
         })
     }
@@ -130,7 +130,7 @@ impl App {
             stats: None,
             settings: SettingsView::new(),
             session: None,
-            fx: FxState::with_intensity(cfg.user.fx.intensity),
+            fx: FxState::with_config(cfg.user.fx.intensity, cfg.user.fx.preset),
             splash_started: None,
         })
     }
@@ -432,6 +432,7 @@ impl App {
                     kind,
                     SettingKind::TabWidth
                         | SettingKind::FxIntensity
+                        | SettingKind::FxPreset
                         | SettingKind::ProgressMode
                         | SettingKind::DependencyDirection
                         | SettingKind::Bool
@@ -447,6 +448,7 @@ impl App {
                     kind,
                     SettingKind::TabWidth
                         | SettingKind::FxIntensity
+                        | SettingKind::FxPreset
                         | SettingKind::ProgressMode
                         | SettingKind::DependencyDirection
                 ) {
@@ -467,6 +469,7 @@ impl App {
     fn persist_user_config(&mut self) -> crate::Result<()> {
         save_user_config(&self.cfg.config_path, &self.cfg.user)?;
         self.fx.set_intensity(self.cfg.user.fx.intensity);
+        self.fx.set_preset(self.cfg.user.fx.preset);
         Ok(())
     }
 
@@ -634,6 +637,7 @@ impl App {
         let auto_indent = self.cfg.user.typing.auto_indent;
         let tab_width = self.cfg.user.content.tab_width;
         let fx_intensity = self.cfg.user.fx.intensity;
+        let fx_preset = self.cfg.user.fx.preset;
 
         let Some(session) = &mut self.session else {
             return Err(Error::Message("no repository open".into()));
@@ -662,7 +666,7 @@ impl App {
             auto_indent,
             tab_width,
         ));
-        self.fx = FxState::with_intensity(fx_intensity);
+        self.fx = FxState::with_config(fx_intensity, fx_preset);
         session.typing_path = path.to_string();
         session.typing_chunk_label = label;
         session.typing_chunk_id = chunk_id;

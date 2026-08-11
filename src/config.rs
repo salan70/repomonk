@@ -46,6 +46,8 @@ pub struct ProgressConfig {
 pub struct FxConfig {
     pub enabled: bool,
     pub intensity: FxIntensity,
+    #[serde(default)]
+    pub preset: FxPreset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +71,19 @@ pub enum FxIntensity {
     Subtle,
     Normal,
     High,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FxPreset {
+    #[default]
+    Classic,
+    #[serde(alias = "flare", alias = "ember")]
+    Blaze,
+    #[serde(alias = "comet", alias = "matrix")]
+    Smear,
+    #[serde(alias = "pulse")]
+    Ripple,
 }
 
 impl Default for UserConfig {
@@ -97,6 +112,7 @@ impl Default for UserConfig {
             fx: FxConfig {
                 enabled: true,
                 intensity: FxIntensity::Normal,
+                preset: FxPreset::Classic,
             },
         }
     }
@@ -173,6 +189,35 @@ impl FxIntensity {
     }
 }
 
+impl FxPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Blaze => "blaze",
+            Self::Smear => "smear",
+            Self::Ripple => "ripple",
+        }
+    }
+
+    pub fn cycle_next(self) -> Self {
+        match self {
+            Self::Classic => Self::Blaze,
+            Self::Blaze => Self::Smear,
+            Self::Smear => Self::Ripple,
+            Self::Ripple => Self::Classic,
+        }
+    }
+
+    pub fn cycle_prev(self) -> Self {
+        match self {
+            Self::Classic => Self::Ripple,
+            Self::Blaze => Self::Classic,
+            Self::Smear => Self::Blaze,
+            Self::Ripple => Self::Smear,
+        }
+    }
+}
+
 impl UserConfig {
     /// Whether visual effects should run (ignores CLI `--no-fx`).
     pub fn fx_active(&self) -> bool {
@@ -209,7 +254,8 @@ fn parse_toml(text: &str, path: &Path) -> crate::Result<UserConfig> {
         Error::Config(format!(
             "invalid config at {}:\n  {e}\nFix: correct the value to match docs/product-requirements.md §11 \
              (booleans true/false, tab_width 1–8, mode \"manual\"|\"dependency\", \
-             dependency_direction \"top_down\"|\"bottom_up\", intensity \"off\"|\"subtle\"|\"normal\"|\"high\")",
+             dependency_direction \"top_down\"|\"bottom_up\", intensity \"off\"|\"subtle\"|\"normal\"|\"high\", \
+             preset \"classic\"|\"blaze\"|\"smear\"|\"ripple\")",
             path.display()
         ))
     })?;
@@ -272,11 +318,46 @@ mod tests {
         cfg.content.tab_width = 2;
         cfg.typing.show_live_speed = true;
         cfg.fx.intensity = FxIntensity::Subtle;
+        cfg.fx.preset = FxPreset::Blaze;
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.content.tab_width, 2);
         assert!(loaded.typing.show_live_speed);
         assert_eq!(loaded.fx.intensity, FxIntensity::Subtle);
+        assert_eq!(loaded.fx.preset, FxPreset::Blaze);
+    }
+
+    #[test]
+    fn missing_preset_uses_classic() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut text = toml::to_string_pretty(&UserConfig::default()).unwrap();
+        text = text.replace("preset = \"classic\"\n", "");
+        fs::write(&path, text).unwrap();
+
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded.fx.preset, FxPreset::Classic);
+    }
+
+    #[test]
+    fn legacy_presets_map_to_cursor_presets() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for (legacy, expected) in [
+            ("flare", FxPreset::Blaze),
+            ("ember", FxPreset::Blaze),
+            ("comet", FxPreset::Smear),
+            ("matrix", FxPreset::Smear),
+            ("pulse", FxPreset::Ripple),
+        ] {
+            let text = toml::to_string_pretty(&UserConfig::default())
+                .unwrap()
+                .replace("preset = \"classic\"", &format!("preset = \"{legacy}\""));
+            fs::write(&path, text).unwrap();
+
+            assert_eq!(load(&path).unwrap().fx.preset, expected);
+        }
     }
 
     #[test]

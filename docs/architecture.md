@@ -48,7 +48,7 @@ src/
     tree.rs            ファイルツリー
     typing.rs          写経画面
     result.rs          リザルト画面
-    fx.rs              カーソル演出
+    fx.rs              カーソル移動とブレイズ軌跡の演出状態機械
     theme.rs           Tokyo Night配色
 tests/
   fixtures/            小さな疑似リポジトリ
