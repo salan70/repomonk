@@ -1,0 +1,23 @@
+[package]
+name = "repomonk"
+version = "0.1.0"
+edition = "2021"
+description = "Type through real GitHub repositories in your terminal"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/salan70/repomonk"
+keywords = ["typing", "tui", "git", "practice"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+dirs = "6"
+ratatui = "0.29"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
