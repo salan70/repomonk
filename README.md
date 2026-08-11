@@ -4,9 +4,25 @@
 Rust 製 TUI アプリです。完了したチャンクを積み上げ、リポジトリのファイル
 ツリーを少しずつ塗りつぶしていく体験を目指します。
 
-現在は、実装に先立って仕様と設計を整備している段階です。細かな段階リリースは
-設けず、AIエージェントで作業を分担し、最初から一連の体験が使えるMVPを完成
-させます。
+## 使い方
+
+```sh
+# ローカルリポジトリまたは単一ファイル
+cargo run -- /path/to/repo
+
+# GitHub（system git で shallow clone、~/.cache/repomonk にキャッシュ）
+cargo run -- https://github.com/<owner>/<repo>
+cargo run -- <owner>/<repo>
+
+# 管理データの削除（確認あり。CI では --yes）
+cargo run -- --purge
+```
+
+操作の目安:
+
+- Tree: `j`/`k` 移動、Enter で開く、Space で折りたたみ、`q`/Esc で終了
+- Typing: 正しいキーのみ受理、Backspace、Esc で中断
+- Result: Enter/Esc で Tree へ、`r` で同ファイルの次チャンク（残っている場合）
 
 ## ドキュメント
 
@@ -17,22 +33,24 @@ Rust 製 TUI アプリです。完了したチャンクを積み上げ、リポ�
 - [意思決定記録](docs/decisions.md)
 - [GitHub公開前チェックリスト](docs/public-release-checklist.md)
 
-ユーザーから見える挙動については、プロダクト要件を正とします。設計や計画を
-変更する際、ユーザー体験にも影響がある場合は、プロダクト要件と意思決定記録も
-同じ変更で更新します。
+## 開発
 
-## 採用予定の技術
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
 
-- Rust
-- `ratatui` / `crossterm`
-- `tree-sitter`
-- bundled SQLite を有効にした `rusqlite`
-- リポジトリ取得にはシステムの `git`
+## 技術
+
+- Rust / `ratatui` / `crossterm`
+- bundled SQLite（`rusqlite`）
+- リポジトリ取得はシステムの `git`（GitHub API は使わない）
 
 ## 現在の状態
 
-実行可能なコードはまだありません。MVPの範囲と完了条件は
-[実装計画](docs/implementation-plan.md)に記載します。
+MVP の縦切り体験（取得 → ツリー → 写経 → 結果 → 進捗保存）が動作します。
+tree-sitter ラベル、dependency モード、Home/Search、演出などは MVP 後です。
 
 ## ライセンス
 
