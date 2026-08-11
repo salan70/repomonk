@@ -1,4 +1,4 @@
-//! Application state machine: Tree → Typing → Result.
+//! Application state machine: Splash → Tree → Typing → Result.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -13,7 +13,9 @@ use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
 use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
 use crate::store::SqliteStore;
+use crate::ui::fx::FxState;
 use crate::ui::result::{draw_result, ResultView};
+use crate::ui::splash::{draw_splash, SPLASH_TOTAL_MS};
 use crate::ui::terminal::TerminalGuard;
 use crate::ui::tree::{draw_tree, TreeView};
 use crate::ui::typing::draw_typing;
@@ -21,6 +23,7 @@ use crate::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Splash,
     Tree,
     Typing,
     Result,
@@ -30,10 +33,11 @@ pub struct AppConfig {
     pub cache_dir: PathBuf,
     pub db_path: PathBuf,
     pub refresh: bool,
+    /// Enable visual effects (splash animation, glow, trails).
+    pub fx_enabled: bool,
 }
 
 pub struct App {
-    #[allow(dead_code)]
     repo: ResolvedRepository,
     repo_id: i64,
     progress: RepoProgress,
@@ -48,6 +52,9 @@ pub struct App {
     result: Option<ResultView>,
     /// When opening a single file, only that relative path is the focus root display.
     single_file: Option<String>,
+    fx_enabled: bool,
+    fx: FxState,
+    splash_started: Option<Instant>,
 }
 
 impl App {
@@ -83,6 +90,7 @@ impl App {
                         progress,
                         store,
                         Some(name),
+                        cfg.fx_enabled,
                     ));
                 }
             }
@@ -103,6 +111,7 @@ impl App {
             progress,
             store,
             single_file,
+            cfg.fx_enabled,
         ))
     }
 
@@ -112,6 +121,7 @@ impl App {
         progress: RepoProgress,
         store: SqliteStore,
         single_file: Option<String>,
+        fx_enabled: bool,
     ) -> Self {
         let tree = TreeView::from_progress(&repo.display_name, &progress);
         Self {
@@ -128,6 +138,9 @@ impl App {
             session_started_at: String::new(),
             result: None,
             single_file,
+            fx_enabled,
+            fx: FxState::new(),
+            splash_started: None,
         }
     }
 
@@ -139,24 +152,46 @@ impl App {
         let mut guard = TerminalGuard::enter()?;
         let mut last_tick = Instant::now();
         let tick_rate = Duration::from_millis(16);
+        if self.fx_enabled {
+            self.screen = Screen::Splash;
+            self.splash_started = Some(Instant::now());
+        }
 
         loop {
             let now_ms = now_millis();
+            let typing_snap = if self.screen == Screen::Typing {
+                self.engine.as_ref().map(|e| e.snapshot())
+            } else {
+                None
+            };
+            if self.fx_enabled {
+                if let Some(snap) = &typing_snap {
+                    self.fx.observe(snap, now_ms);
+                }
+            }
+            let splash_elapsed = self
+                .splash_started
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
             {
                 let term = guard.terminal();
                 term.draw(|frame| {
                     let area = frame.area();
                     match self.screen {
+                        Screen::Splash => {
+                            draw_splash(frame, area, splash_elapsed, &self.repo.display_name)
+                        }
                         Screen::Tree => draw_tree(frame, area, &self.tree),
                         Screen::Typing => {
-                            if let Some(engine) = &self.engine {
+                            if let Some(snap) = &typing_snap {
                                 draw_typing(
                                     frame,
                                     area,
                                     &self.typing_path,
                                     &self.typing_chunk_label,
-                                    &engine.snapshot(),
+                                    snap,
                                     now_ms,
+                                    self.fx_enabled.then_some(&self.fx),
                                 );
                             }
                         }
@@ -184,6 +219,9 @@ impl App {
             }
 
             if last_tick.elapsed() >= tick_rate {
+                if self.screen == Screen::Splash && splash_elapsed >= SPLASH_TOTAL_MS {
+                    self.screen = Screen::Tree;
+                }
                 if let Some(engine) = &mut self.engine {
                     engine.apply(TypingCommand::Tick {
                         now_ms: now_millis(),
@@ -209,6 +247,10 @@ impl App {
         }
 
         match self.screen {
+            Screen::Splash => {
+                self.screen = Screen::Tree;
+                Ok(false)
+            }
             Screen::Tree => self.handle_tree_key(key),
             Screen::Typing => self.handle_typing_key(key),
             Screen::Result => self.handle_result_key(key),
@@ -311,6 +353,7 @@ impl App {
 
         let started_ms = now_millis();
         self.engine = Some(TypingEngine::new(&cp.chunk.normalized, started_ms, true, 4));
+        self.fx = FxState::new();
         self.typing_path = path.to_string();
         self.typing_chunk_label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
         self.typing_chunk_id = chunk_id;
@@ -403,6 +446,7 @@ pub mod headless {
                 cache_dir: cache.to_path_buf(),
                 db_path: db.to_path_buf(),
                 refresh: false,
+                fx_enabled: false,
             },
         )
     }

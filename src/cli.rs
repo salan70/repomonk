@@ -22,6 +22,10 @@ pub struct Cli {
     #[arg(long)]
     pub yes: bool,
 
+    /// Disable visual effects (splash animation, glow, trails).
+    #[arg(long = "no-fx")]
+    pub no_fx: bool,
+
     /// Override cache directory (tests / portable installs).
     #[arg(long, env = "REPOMONK_CACHE_DIR", hide = true)]
     pub cache_dir: Option<PathBuf>,

@@ -1,13 +1,14 @@
 //! File tree view model and rendering.
 
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Gauge, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::domain::content::{FileStatus, RepoProgress};
 use crate::domain::progress::directory_progress;
+use crate::ui::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeRowKind {
@@ -19,7 +20,14 @@ pub enum TreeRowKind {
 pub struct TreeRow {
     pub kind: TreeRowKind,
     pub depth: usize,
-    pub label: String,
+    /// Display name (file name or directory name without trailing slash).
+    pub name: String,
+    /// `(completed, total)` normalized line counts; `None` for skipped files.
+    pub progress: Option<(usize, usize)>,
+    /// File status; `None` for directories.
+    pub status: Option<FileStatus>,
+    /// Human-readable skip reason for skipped files.
+    pub skip_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +37,8 @@ pub struct TreeView {
     pub recommend: Option<String>,
     pub title: String,
     pub collapsed: std::collections::HashSet<String>,
+    /// Repository-wide `(completed, total)` normalized line counts.
+    pub overall: (usize, usize),
 }
 
 impl TreeView {
@@ -41,11 +51,13 @@ impl TreeView {
             recommend,
             title: repo_name.to_string(),
             collapsed: std::collections::HashSet::new(),
+            overall: overall_progress(progress),
         }
     }
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
         self.recommend = progress.recommend_path().map(str::to_string);
+        self.overall = overall_progress(progress);
         let prev_path = self.selected_file_path();
         self.rows = flatten(progress, &self.collapsed);
         if let Some(path) = prev_path {
@@ -94,6 +106,11 @@ impl TreeView {
     }
 }
 
+fn overall_progress(progress: &RepoProgress) -> (usize, usize) {
+    let root = directory_progress(progress, "");
+    (root.completed_lines, root.total_lines)
+}
+
 fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     // Build a simple path-sorted expansion.
@@ -134,14 +151,13 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
                 }
                 if !emitted_dirs.contains(&acc) {
                     let dprog = directory_progress(progress, &acc);
-                    let label = format!(
-                        "{}/  [{}/{} lines]",
-                        part, dprog.completed_lines, dprog.total_lines
-                    );
                     rows.push(TreeRow {
                         kind: TreeRowKind::Dir { path: acc.clone() },
                         depth: i,
-                        label,
+                        name: (*part).to_string(),
+                        progress: Some((dprog.completed_lines, dprog.total_lines)),
+                        status: None,
+                        skip_reason: None,
                     });
                     emitted_dirs.insert(acc.clone());
                 }
@@ -150,25 +166,20 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
                 }
             } else if !hidden {
                 let status = f.derive_status();
-                let mark = match status {
-                    FileStatus::Done => "✓",
-                    FileStatus::Skipped => "·",
-                    FileStatus::Todo => "○",
-                };
-                let mut label = format!("{mark} {part}");
-                if status == FileStatus::Skipped {
-                    if let Some(reason) = &f.skip_reason {
-                        label.push_str(&format!("  ({})", reason.as_str()));
-                    }
+                let (progress_counts, skip_reason) = if status == FileStatus::Skipped {
+                    (None, f.skip_reason.as_ref().map(|r| r.as_str().to_string()))
                 } else {
-                    label.push_str(&format!("  [{}/{}]", f.completed_lines(), f.total_lines()));
-                }
+                    (Some((f.completed_lines(), f.total_lines())), None)
+                };
                 rows.push(TreeRow {
                     kind: TreeRowKind::File {
                         path: f.relative_path.clone(),
                     },
                     depth: i,
-                    label,
+                    name: (*part).to_string(),
+                    progress: progress_counts,
+                    status: Some(status),
+                    skip_reason,
                 });
             }
         }
@@ -177,48 +188,142 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
 }
 
 pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
-    let block = Block::default()
-        .title(format!(" {} ", view.title))
-        .borders(Borders::ALL);
+    theme::fill_background(frame, area);
+    let block = theme::bordered_block(theme::title_line(&view.title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let panes = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    // Header: repository-wide progress gauge.
+    let (completed, total) = view.overall;
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        completed as f64 / total as f64
+    };
+    let gauge = Gauge::default()
+        .ratio(ratio)
+        .use_unicode(true)
+        .gauge_style(Style::default().fg(theme::BLUE).bg(theme::CURRENT_LINE_BG))
+        .label(Span::styled(
+            format!("{completed}/{total} lines · {:.0}%", ratio * 100.0),
+            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+        ));
+    let gauge_area = Rect {
+        x: panes[0].x + 1,
+        y: panes[0].y,
+        width: panes[0].width.saturating_sub(2),
+        height: panes[0].height,
+    };
+    frame.render_widget(gauge, gauge_area);
+
+    // Body: tree rows.
     let items: Vec<ListItem> = view
         .rows
         .iter()
-        .enumerate()
-        .map(|(idx, row)| {
-            let indent = "  ".repeat(row.depth);
-            let mut style = Style::default();
-            let mut text = format!("{indent}{}", row.label);
-            if let TreeRowKind::File { path } = &row.kind {
-                if view.recommend.as_deref() == Some(path.as_str()) {
-                    text.push_str("  ← recommend");
-                    style = style.fg(Color::Cyan);
-                }
-            }
-            if idx == view.selected {
-                style = style.add_modifier(Modifier::REVERSED);
-            }
-            ListItem::new(Line::from(Span::styled(text, style)))
-        })
+        .map(|row| ListItem::new(row_line(row, view)))
         .collect();
 
     let mut state = ListState::default();
     if !view.rows.is_empty() {
         state.select(Some(view.selected));
     }
-    let list = List::new(items);
-    frame.render_stateful_widget(list, inner, &mut state);
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(theme::SELECTION_BG))
+        .style(theme::base_style());
+    frame.render_stateful_widget(list, panes[2], &mut state);
 
-    let help = Paragraph::new("j/k move  Enter open  Space fold  q quit  Esc back");
-    let help_area = Rect {
-        x: area.x + 1,
-        y: area.y.saturating_add(area.height.saturating_sub(1)),
-        width: area.width.saturating_sub(2),
-        height: 1,
-    };
-    if help_area.y > area.y {
-        frame.render_widget(help, help_area);
+    // Footer: key hints.
+    frame.render_widget(
+        Paragraph::new(theme::key_hints(&[
+            ("j/k", "move"),
+            ("Enter", "open"),
+            ("Space", "fold"),
+            ("q/Esc", "quit"),
+        ])),
+        panes[3],
+    );
+}
+
+fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
+    let mut spans: Vec<Span> = Vec::new();
+    spans.push(Span::raw(" ".repeat(1 + row.depth * 2)));
+
+    match &row.kind {
+        TreeRowKind::Dir { path } => {
+            let arrow = if view.collapsed.contains(path) {
+                "▸ "
+            } else {
+                "▾ "
+            };
+            spans.push(Span::styled(
+                arrow.to_string(),
+                Style::default().fg(theme::MUTED),
+            ));
+            spans.push(Span::styled(
+                format!("{}/", row.name),
+                Style::default()
+                    .fg(theme::BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if let Some((done, total)) = row.progress {
+                spans.push(Span::styled(
+                    format!("  [{done}/{total} lines]"),
+                    Style::default().fg(theme::MUTED),
+                ));
+            }
+        }
+        TreeRowKind::File { path } => {
+            let status = row.status.unwrap_or(FileStatus::Todo);
+            let (mark, mark_color, name_color) = match status {
+                FileStatus::Done => ("✓", theme::GREEN, theme::MUTED),
+                FileStatus::Todo => ("○", theme::FG, theme::FG),
+                FileStatus::Skipped => ("·", theme::MUTED, theme::MUTED),
+            };
+            spans.push(Span::styled(
+                format!("{mark} "),
+                Style::default().fg(mark_color),
+            ));
+            spans.push(Span::styled(
+                row.name.clone(),
+                Style::default().fg(name_color),
+            ));
+            if let Some(reason) = &row.skip_reason {
+                spans.push(Span::styled(
+                    format!("  ({reason})"),
+                    Style::default()
+                        .fg(theme::MUTED)
+                        .add_modifier(Modifier::ITALIC),
+                ));
+            } else if let Some((done, total)) = row.progress {
+                let color = if status == FileStatus::Done {
+                    theme::GREEN
+                } else {
+                    theme::MUTED
+                };
+                spans.push(Span::styled(
+                    format!("  [{done}/{total}]"),
+                    Style::default().fg(color),
+                ));
+            }
+            if view.recommend.as_deref() == Some(path.as_str()) {
+                spans.push(Span::styled(
+                    "  ▸ recommend",
+                    Style::default()
+                        .fg(theme::CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
     }
+    Line::from(spans)
 }

@@ -1,12 +1,13 @@
 //! Result screen.
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::domain::content::TypingMetrics;
+use crate::ui::theme;
 
 #[derive(Debug, Clone)]
 pub struct ResultView {
@@ -17,54 +18,60 @@ pub struct ResultView {
 }
 
 pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
-    let block = Block::default().title(" Result ").borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    theme::fill_background(frame, area);
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(6),
-            Constraint::Length(2),
-            Constraint::Min(1),
-        ])
-        .split(inner);
+    let card_width = (view.path.chars().count() as u16 + 8).clamp(46, area.width);
+    let card = theme::centered_rect(area, card_width, 15);
+    let block = theme::bordered_block(theme::title_line("Result"));
+    let inner = block.inner(card);
+    frame.render_widget(block, card);
 
-    let headline = if view.completed {
+    let (headline, color) = if view.completed {
         if view.file_done {
-            "File complete"
+            ("✓ File complete", theme::GREEN)
         } else {
-            "Session complete"
+            ("✓ Session complete", theme::GREEN)
         }
     } else {
-        "Interrupted"
+        ("✗ Interrupted", theme::YELLOW)
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            headline,
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ))),
-        layout[0],
-    );
 
     let m = &view.metrics;
-    let body = vec![
-        Line::from(format!("file: {}", view.path)),
-        Line::from(format!(
-            "accuracy: {:.1}%   KPM: {:.0}   WPM: {:.0}",
-            m.accuracy, m.kpm, m.wpm
-        )),
-        Line::from(format!(
-            "keystrokes: {}   misses: {}   time: {:.1}s",
-            m.keystrokes,
-            m.misses,
-            m.elapsed_ms as f64 / 1000.0
-        )),
-    ];
-    frame.render_widget(Paragraph::new(body), layout[1]);
+    // Fixed-width labels keep the value column aligned inside the card.
+    let label_indent = inner.width.saturating_sub(30) / 2;
+    let metric = move |label: &str, value: String| -> Line<'static> {
+        Line::from(vec![
+            Span::raw(" ".repeat(label_indent as usize)),
+            Span::styled(format!("{label:>12}  "), Style::default().fg(theme::MUTED)),
+            Span::styled(
+                value,
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
+        ])
+    };
 
-    frame.render_widget(Paragraph::new("Enter/Esc: back to tree"), layout[2]);
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            headline,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center),
+        Line::from(Span::styled(
+            view.path.clone(),
+            Style::default().fg(theme::MUTED),
+        ))
+        .alignment(Alignment::Center),
+        Line::from(""),
+        metric("accuracy", format!("{:.1}%", m.accuracy)),
+        metric("KPM", format!("{:.0}", m.kpm)),
+        metric("WPM", format!("{:.0}", m.wpm)),
+        metric("keystrokes", format!("{}", m.keystrokes)),
+        metric("misses", format!("{}", m.misses)),
+        metric("time", format!("{:.1}s", m.elapsed_ms as f64 / 1000.0)),
+        Line::from(""),
+        theme::key_hints(&[("Enter/Esc", "back to tree"), ("q", "quit")])
+            .alignment(Alignment::Center),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }

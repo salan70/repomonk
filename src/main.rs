@@ -42,6 +42,7 @@ fn run() -> repomonk::Result<()> {
         cache_dir: paths.cache_dir.clone(),
         db_path: paths.db_path.clone(),
         refresh: cli.refresh,
+        fx_enabled: !cli.no_fx,
     };
     let mut app = App::open(&target, &cfg)?;
     app.run()
