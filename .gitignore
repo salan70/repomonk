@@ -28,3 +28,8 @@
 # Temporary files
 *.tmp
 *.log
+
+
+# Added by cargo
+
+/target
