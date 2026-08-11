@@ -54,9 +54,8 @@ fn render_body(snap: &TypingSnapshot, now_ms: u64, height: usize) -> Vec<Line<'s
         .map(|until| now_ms < until)
         .unwrap_or(false);
 
-    // Keep current line roughly centered.
-    let half = height / 2;
-    let start = cursor_line.saturating_sub(half);
+    let height = height.max(1);
+    let start = viewport_start(cursor_line, lines.len(), height);
     let end = (start + height).min(lines.len());
 
     let mut out = Vec::new();
@@ -88,6 +87,24 @@ fn render_body(snap: &TypingSnapshot, now_ms: u64, height: usize) -> Vec<Line<'s
     out
 }
 
+/// Choose the first visible line so the whole file fits when possible,
+/// otherwise keep the cursor visible with more upcoming context than past lines.
+fn viewport_start(cursor_line: usize, total_lines: usize, height: usize) -> usize {
+    if total_lines <= height {
+        return 0;
+    }
+    // Near the top: pin to start so the file opens showing as much as possible.
+    if cursor_line < height.saturating_sub(height / 3) {
+        return 0;
+    }
+    // Near the bottom: pin to end.
+    if cursor_line + height / 3 >= total_lines {
+        return total_lines - height;
+    }
+    // Otherwise keep the cursor around the upper third so upcoming lines stay visible.
+    cursor_line.saturating_sub(height / 3)
+}
+
 fn split_lines(chars: &[char]) -> Vec<Vec<(usize, char)>> {
     let mut lines = Vec::new();
     let mut cur = Vec::new();
@@ -115,4 +132,32 @@ fn line_index_at(lines: &[Vec<(usize, char)>], cursor: usize) -> usize {
         }
     }
     lines.len().saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_file_shows_from_top() {
+        assert_eq!(viewport_start(0, 10, 20), 0);
+        assert_eq!(viewport_start(5, 10, 20), 0);
+    }
+
+    #[test]
+    fn start_of_long_file_pins_to_top() {
+        assert_eq!(viewport_start(0, 100, 20), 0);
+        assert_eq!(viewport_start(5, 100, 20), 0);
+    }
+
+    #[test]
+    fn middle_keeps_upcoming_context() {
+        // height/3 == 6 → start = 30 - 6 = 24
+        assert_eq!(viewport_start(30, 100, 20), 24);
+    }
+
+    #[test]
+    fn end_pins_to_bottom() {
+        assert_eq!(viewport_start(95, 100, 20), 80);
+    }
 }

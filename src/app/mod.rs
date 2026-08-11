@@ -310,9 +310,10 @@ impl App {
             .ok_or_else(|| Error::Message("file body missing database id".into()))?;
 
         let started_ms = now_millis();
+        let line_count = crate::domain::content::normalized_line_count(&cp.chunk.normalized);
         self.engine = Some(TypingEngine::new(&cp.chunk.normalized, started_ms, true, 4));
         self.typing_path = path.to_string();
-        self.typing_chunk_label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
+        self.typing_chunk_label = format!("{line_count} lines");
         self.typing_chunk_id = chunk_id;
         self.session_started_at = Utc::now().to_rfc3339();
         self.result = None;

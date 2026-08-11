@@ -62,7 +62,7 @@ pub struct TypingEngine {
 const MISS_FLASH_MS: u64 = 150;
 
 impl TypingEngine {
-    /// Create an engine for `normalized` chunk text.
+    /// Create an engine for normalized file text.
     ///
     /// Leading indentation on each line is auto-inserted when the cursor
     /// reaches the start of that line (including the first line).
