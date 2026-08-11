@@ -31,7 +31,13 @@ pub struct TypingConfig {
     pub auto_indent: bool,
     pub auto_close_brackets: bool,
     pub allow_backspace: bool,
+    #[serde(default = "default_syntax_highlight")]
+    pub syntax_highlight: bool,
     pub show_live_speed: bool,
+}
+
+fn default_syntax_highlight() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +107,7 @@ impl Default for UserConfig {
                 auto_indent: true,
                 auto_close_brackets: false,
                 allow_backspace: true,
+                syntax_highlight: true,
                 show_live_speed: false,
             },
             progress: ProgressConfig {
@@ -316,12 +323,14 @@ mod tests {
         let path = dir.path().join("config.toml");
         let mut cfg = UserConfig::default();
         cfg.content.tab_width = 2;
+        cfg.typing.syntax_highlight = false;
         cfg.typing.show_live_speed = true;
         cfg.fx.intensity = FxIntensity::Subtle;
         cfg.fx.preset = FxPreset::Blaze;
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.content.tab_width, 2);
+        assert!(!loaded.typing.syntax_highlight);
         assert!(loaded.typing.show_live_speed);
         assert_eq!(loaded.fx.intensity, FxIntensity::Subtle);
         assert_eq!(loaded.fx.preset, FxPreset::Blaze);
@@ -338,6 +347,19 @@ mod tests {
         let loaded = load(&path).unwrap();
 
         assert_eq!(loaded.fx.preset, FxPreset::Classic);
+    }
+
+    #[test]
+    fn missing_syntax_highlight_uses_enabled_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut text = toml::to_string_pretty(&UserConfig::default()).unwrap();
+        text = text.replace("syntax_highlight = true\n", "");
+        fs::write(&path, text).unwrap();
+
+        let loaded = load(&path).unwrap();
+
+        assert!(loaded.typing.syntax_highlight);
     }
 
     #[test]

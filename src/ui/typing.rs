@@ -28,6 +28,7 @@ pub fn draw_typing(
     path: &str,
     file_label: &str,
     snap: &TypingSnapshot,
+    syntax_colors: Option<&[Color]>,
     now_ms: u64,
     fx: Option<&FxState>,
     show_live_speed: bool,
@@ -79,7 +80,7 @@ pub fn draw_typing(
     };
     frame.render_widget(gauge, gauge_area);
 
-    let body = render_body(snap, now_ms, panes[1].height as usize, fx);
+    let body = render_body(snap, syntax_colors, now_ms, panes[1].height as usize, fx);
     frame.render_widget(Paragraph::new(body), panes[1]);
 
     let chars: Vec<char> = snap.target.chars().collect();
@@ -156,6 +157,7 @@ fn status_line(
 
 fn render_body(
     snap: &TypingSnapshot,
+    syntax_colors: Option<&[Color]>,
     now_ms: u64,
     height: usize,
     fx: Option<&FxState>,
@@ -209,7 +211,10 @@ fn render_body(
             };
 
             let mut style = if idx < snap.cursor {
-                let mut fg = if auto { typed_auto } else { theme::GREEN };
+                let mut fg = syntax_colors
+                    .and_then(|colors| colors.get(idx).copied())
+                    .map(|color| theme::lerp(color, theme::BRIGHT, if auto { 0.08 } else { 0.2 }))
+                    .unwrap_or(if auto { typed_auto } else { theme::GREEN });
                 if let Some(glow) = fx.and_then(|f| f.glow_intensity(idx, now_ms)) {
                     let target = match preset {
                         FxPreset::Blaze => theme::ORANGE,
@@ -249,7 +254,10 @@ fn render_body(
                     .bg(bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                let mut fg = theme::MUTED;
+                let mut fg = syntax_colors
+                    .and_then(|colors| colors.get(idx).copied())
+                    .map(|color| theme::lerp(color, theme::MUTED, 0.45))
+                    .unwrap_or(theme::MUTED);
                 if let Some(ripple) = ripple {
                     fg = theme::lerp(fg, theme::CYAN, ripple * 0.8);
                 }

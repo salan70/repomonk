@@ -1,4 +1,5 @@
 pub mod fx;
+pub mod highlight;
 pub mod home;
 pub mod result;
 pub mod search;

@@ -32,6 +32,7 @@ pub enum SettingId {
     AutoIndent,
     AutoCloseBrackets,
     AllowBackspace,
+    SyntaxHighlight,
     ShowLiveSpeed,
     ProgressMode,
     DependencyDirection,
@@ -120,6 +121,13 @@ const SETTINGS: &[SettingDef] = &[
         id: SettingId::ShowLiveSpeed,
         section: "typing",
         label: "show_live_speed",
+        kind: SettingKind::Bool,
+        unsupported: false,
+    },
+    SettingDef {
+        id: SettingId::SyntaxHighlight,
+        section: "typing",
+        label: "syntax_highlight",
         kind: SettingKind::Bool,
         unsupported: false,
     },
@@ -248,6 +256,9 @@ impl SettingsView {
             SettingId::AllowBackspace => {
                 cfg.typing.allow_backspace = !cfg.typing.allow_backspace;
             }
+            SettingId::SyntaxHighlight => {
+                cfg.typing.syntax_highlight = !cfg.typing.syntax_highlight;
+            }
             SettingId::ShowLiveSpeed => {
                 cfg.typing.show_live_speed = !cfg.typing.show_live_speed;
             }
@@ -307,6 +318,7 @@ fn value_string(cfg: &UserConfig, id: SettingId) -> String {
         SettingId::AutoIndent => cfg.typing.auto_indent.to_string(),
         SettingId::AutoCloseBrackets => "false".into(),
         SettingId::AllowBackspace => cfg.typing.allow_backspace.to_string(),
+        SettingId::SyntaxHighlight => cfg.typing.syntax_highlight.to_string(),
         SettingId::ShowLiveSpeed => cfg.typing.show_live_speed.to_string(),
         SettingId::ProgressMode => cfg.progress.mode.as_str().into(),
         SettingId::DependencyDirection => cfg.progress.dependency_direction.as_str().into(),
@@ -446,5 +458,21 @@ mod tests {
             assert!(view.activate(&mut cfg, true));
             assert_eq!(cfg.fx.preset, expected);
         }
+    }
+
+    #[test]
+    fn syntax_highlight_setting_toggles() {
+        let mut view = SettingsView::new();
+        view.selected = SETTINGS
+            .iter()
+            .position(|def| def.id == SettingId::SyntaxHighlight)
+            .expect("syntax highlight setting");
+        let mut cfg = UserConfig::default();
+
+        assert!(cfg.typing.syntax_highlight);
+        assert!(view.activate(&mut cfg, true));
+        assert!(!cfg.typing.syntax_highlight);
+        assert!(view.activate(&mut cfg, true));
+        assert!(cfg.typing.syntax_highlight);
     }
 }

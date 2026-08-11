@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::style::Color;
 
 use crate::config::{save as save_user_config, UserConfig};
 use crate::config::{DependencyDirection, ProgressMode};
@@ -18,6 +19,7 @@ use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
 use crate::store::SqliteStore;
 use crate::ui::fx::FxState;
+use crate::ui::highlight::highlight_chars;
 use crate::ui::home::{draw_home, draw_search_modal, HomeView};
 use crate::ui::result::{draw_result, ResultView};
 use crate::ui::search::SearchState;
@@ -67,6 +69,7 @@ struct RepoSession {
     engine: Option<TypingEngine>,
     typing_path: String,
     typing_chunk_label: String,
+    typing_syntax_colors: Option<Vec<Color>>,
     typing_chunk_id: i64,
     session_started_at: String,
     result: Option<ResultView>,
@@ -218,6 +221,7 @@ impl App {
                                     &s.typing_path,
                                     &s.typing_chunk_label,
                                     snap,
+                                    s.typing_syntax_colors.as_deref(),
                                     now_ms,
                                     self.cfg.fx_enabled().then_some(&self.fx),
                                     self.cfg.user.typing.show_live_speed,
@@ -657,6 +661,12 @@ impl App {
             .ok_or_else(|| Error::Message("file body missing database id".into()))?;
         let normalized = cp.chunk.normalized.clone();
         let label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
+        let syntax_colors = self
+            .cfg
+            .user
+            .typing
+            .syntax_highlight
+            .then(|| highlight_chars(path, &normalized));
 
         let started_ms = now_millis();
         session.engine = Some(TypingEngine::new(
@@ -669,6 +679,7 @@ impl App {
         self.fx = FxState::with_config(fx_intensity, fx_preset);
         session.typing_path = path.to_string();
         session.typing_chunk_label = label;
+        session.typing_syntax_colors = syntax_colors;
         session.typing_chunk_id = chunk_id;
         session.session_started_at = Utc::now().to_rfc3339();
         session.result = None;
@@ -882,6 +893,7 @@ impl RepoSession {
             engine: None,
             typing_path: String::new(),
             typing_chunk_label: String::new(),
+            typing_syntax_colors: None,
             typing_chunk_id: 0,
             session_started_at: String::new(),
             result: None,

@@ -49,6 +49,7 @@ src/
     typing.rs          写経画面
     result.rs          リザルト画面
     fx.rs              カーソル移動とブレイズ軌跡の演出状態機械
+    highlight.rs       Typing本文の字句ハイライトと色配列
     theme.rs           Tokyo Night配色
 tests/
   fixtures/            小さな疑似リポジトリ
@@ -73,6 +74,12 @@ Store  ──► Domain
 
 `domain`は`ratatui`、`crossterm`、`rusqlite`、`git`プロセス、実ファイルI/Oに
 依存しません。`ui`はSQLiteやファイル走査を直接呼びません。
+
+`ui::highlight`は正規化済み本文と相対パスを受け取り、表示用の文字インデックスに
+対応する構文色配列を返します。syntectによる字句解析はTyping開始時に一度だけ
+実行し、入力中に再解析しません。構文色は描画専用であり、`TypingEngine`、進捗、
+永続化のデータモデルには入りません。言語サーバーは起動せず、未対応言語や解析
+失敗時は単色フォールバックを使います。
 
 ## 4. 中心となる契約
 
