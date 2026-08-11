@@ -12,17 +12,17 @@ pub fn draw_typing(
     frame: &mut Frame,
     area: Rect,
     path: &str,
-    chunk_label: &str,
+    file_label: &str,
     snap: &TypingSnapshot,
     now_ms: u64,
 ) {
     let block = Block::default()
-        .title(format!(" {path}  {chunk_label} "))
+        .title(format!(" {path}  {file_label} "))
         .borders(Borders::ALL);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let chunks = Layout::default()
+    let panes = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
@@ -31,19 +31,18 @@ pub fn draw_typing(
         ])
         .split(inner);
 
-    let body = render_body(snap, now_ms, chunks[0].height as usize);
-    frame.render_widget(Paragraph::new(body), chunks[0]);
+    let body = render_body(snap, now_ms, panes[0].height as usize);
+    frame.render_widget(Paragraph::new(body), panes[0]);
 
-    let progress = if snap.target.is_empty() {
-        100
-    } else {
-        (snap.cursor * 100) / snap.target.chars().count().max(1)
-    };
+    let chars: Vec<char> = snap.target.chars().collect();
+    let lines = split_lines(&chars);
+    let total_lines = lines.len().max(1);
+    let current_line = line_index_at(&lines, snap.cursor) + 1;
     let status = format!(
-        "progress {progress}%   misses {}   Esc interrupt",
+        "line {current_line}/{total_lines}   misses {}   Esc interrupt",
         snap.misses
     );
-    frame.render_widget(Paragraph::new(status), chunks[1]);
+    frame.render_widget(Paragraph::new(status), panes[1]);
 }
 
 fn render_body(snap: &TypingSnapshot, now_ms: u64, height: usize) -> Vec<Line<'static>> {

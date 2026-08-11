@@ -13,7 +13,6 @@ pub struct ResultView {
     pub path: String,
     pub completed: bool,
     pub metrics: TypingMetrics,
-    pub has_next_chunk: bool,
     pub file_done: bool,
 }
 
@@ -36,7 +35,7 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
         if view.file_done {
             "File complete"
         } else {
-            "Chunk complete"
+            "Session complete"
         }
     } else {
         "Interrupted"
@@ -67,9 +66,5 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
     ];
     frame.render_widget(Paragraph::new(body), layout[1]);
 
-    let mut help = String::from("Enter/Esc: back to tree");
-    if view.completed && view.has_next_chunk {
-        help.push_str("   r: next chunk");
-    }
-    frame.render_widget(Paragraph::new(help), layout[2]);
+    frame.render_widget(Paragraph::new("Enter/Esc: back to tree"), layout[2]);
 }

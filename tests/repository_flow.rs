@@ -13,7 +13,7 @@ fn fixture_root() -> PathBuf {
 }
 
 #[test]
-fn scan_fixture_marks_skips_and_chunks() {
+fn scan_fixture_marks_skips_and_file_bodies() {
     let scan = scan_repository(&fixture_root(), WalkOptions::default()).unwrap();
     let lock = scan
         .files
@@ -42,16 +42,18 @@ fn scan_fixture_marks_skips_and_chunks() {
         .find(|f| f.relative_path == "src/hello.rs")
         .unwrap();
     assert_eq!(hello.status, FileStatus::Todo);
-    assert!(!hello.chunks.is_empty());
+    assert_eq!(hello.chunks.len(), 1);
     assert!(scan.has_typeable_content());
 }
 
 #[test]
-fn hash_carryover_across_line_shift() {
+fn hash_carryover_when_dropped_lines_shift_numbers() {
     let body = "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n";
     let c1 = extract_chunks("f.rs", body, ExtractOptions::default());
     assert_eq!(c1.len(), 1);
-    let shifted = format!("\n\n{body}");
+    // Non-ASCII lines are dropped before hashing, so display line numbers shift
+    // while the normalized body (and hash) stay the same.
+    let shifted = format!("コメント\n別コメント\n{body}");
     let c2 = extract_chunks("f.rs", &shifted, ExtractOptions::default());
     assert_eq!(c1[0].hash, c2[0].hash);
     assert_ne!(c1[0].start_line, c2[0].start_line);
@@ -67,19 +69,32 @@ fn headless_complete_persists_and_reloads() {
 
     let fixture = fixture_root();
     let mut app = open_local(fixture.to_str().unwrap(), &db, &cache).unwrap();
-    assert!(app.progress().total_chunks() > 0);
-    let before = app.progress().completed_chunks();
+    assert!(app.progress().total_lines() > 0);
+    let before = app.progress().completed_lines();
+    let before_files = app
+        .progress()
+        .files
+        .iter()
+        .filter(|f| f.derive_status() == FileStatus::Done)
+        .count();
     complete_recommended(&mut app).unwrap();
-    assert_eq!(app.progress().completed_chunks(), before + 1);
+    assert!(app.progress().completed_lines() > before);
+    assert_eq!(
+        app.progress()
+            .files
+            .iter()
+            .filter(|f| f.derive_status() == FileStatus::Done)
+            .count(),
+        before_files + 1
+    );
 
     let app2 = open_local(fixture.to_str().unwrap(), &db, &cache).unwrap();
-    assert!(app2.progress().completed_chunks() >= 1);
+    assert!(app2.progress().completed_lines() >= 1);
     assert!(app2
         .progress()
         .files
         .iter()
-        .flat_map(|f| f.chunks.iter())
-        .any(|c| c.completion == ChunkCompletion::Complete));
+        .any(|f| f.derive_status() == FileStatus::Done));
 }
 
 #[test]

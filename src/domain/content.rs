@@ -42,7 +42,7 @@ impl SkipReason {
             Self::Binary => "binary file".into(),
             Self::LineTooLong { max_cols } => format!("line longer than {max_cols} cols"),
             Self::FileTooLarge { max_lines } => format!("more than {max_lines} lines"),
-            Self::NoChunks => "no typeable chunks".into(),
+            Self::NoChunks => "no typeable content".into(),
             Self::IoError(msg) => format!("read error: {msg}"),
         }
     }
@@ -124,15 +124,19 @@ pub struct ChunkProgress {
 }
 
 impl FileProgress {
-    pub fn completed_chunks(&self) -> usize {
+    pub fn total_lines(&self) -> usize {
+        self.chunks
+            .iter()
+            .map(|c| normalized_line_count(&c.chunk.normalized))
+            .sum()
+    }
+
+    pub fn completed_lines(&self) -> usize {
         self.chunks
             .iter()
             .filter(|c| c.completion == ChunkCompletion::Complete)
-            .count()
-    }
-
-    pub fn total_chunks(&self) -> usize {
-        self.chunks.len()
+            .map(|c| normalized_line_count(&c.chunk.normalized))
+            .sum()
     }
 
     pub fn derive_status(&self) -> FileStatus {
@@ -142,7 +146,11 @@ impl FileProgress {
         if self.chunks.is_empty() {
             return FileStatus::Skipped;
         }
-        if self.completed_chunks() == self.total_chunks() {
+        if self
+            .chunks
+            .iter()
+            .all(|c| c.completion == ChunkCompletion::Complete)
+        {
             FileStatus::Done
         } else {
             FileStatus::Todo
@@ -156,6 +164,15 @@ impl FileProgress {
     }
 }
 
+/// Count lines in a normalized body (`""` → 0).
+pub fn normalized_line_count(normalized: &str) -> usize {
+    if normalized.is_empty() {
+        0
+    } else {
+        normalized.split('\n').count()
+    }
+}
+
 /// Aggregate repository progress.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoProgress {
@@ -163,15 +180,19 @@ pub struct RepoProgress {
 }
 
 impl RepoProgress {
-    pub fn completed_chunks(&self) -> usize {
-        self.files.iter().map(FileProgress::completed_chunks).sum()
-    }
-
-    pub fn total_chunks(&self) -> usize {
+    pub fn completed_lines(&self) -> usize {
         self.files
             .iter()
             .filter(|f| f.derive_status() != FileStatus::Skipped)
-            .map(FileProgress::total_chunks)
+            .map(FileProgress::completed_lines)
+            .sum()
+    }
+
+    pub fn total_lines(&self) -> usize {
+        self.files
+            .iter()
+            .filter(|f| f.derive_status() != FileStatus::Skipped)
+            .map(FileProgress::total_lines)
             .sum()
     }
 
@@ -179,29 +200,15 @@ impl RepoProgress {
         self.files.iter().all(|f| {
             let s = f.derive_status();
             s == FileStatus::Done || s == FileStatus::Skipped
-        }) && self.total_chunks() > 0
+        }) && self.total_lines() > 0
     }
 
     pub fn recommend_path(&self) -> Option<&str> {
-        // Prefer partially completed files, else path order of incomplete.
-        let mut partial: Option<&str> = None;
-        let mut first_todo: Option<&str> = None;
-        for f in &self.files {
-            if f.derive_status() != FileStatus::Todo {
-                continue;
-            }
-            let done = f.completed_chunks();
-            if done > 0 && done < f.total_chunks() {
-                return Some(f.relative_path.as_str());
-            }
-            if partial.is_none() && done > 0 {
-                partial = Some(f.relative_path.as_str());
-            }
-            if first_todo.is_none() {
-                first_todo = Some(f.relative_path.as_str());
-            }
-        }
-        partial.or(first_todo)
+        // Path order of incomplete files (file-unit typing has no partial file).
+        self.files
+            .iter()
+            .find(|f| f.derive_status() == FileStatus::Todo)
+            .map(|f| f.relative_path.as_str())
     }
 }
 

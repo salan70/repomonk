@@ -1,24 +1,18 @@
-//! Normalize source text and split into chunks.
+//! Normalize source text into a single file-body typing unit.
 
 use sha2::{Digest, Sha256};
 
 use crate::domain::content::Chunk;
 
-/// Extraction / normalization options (MVP defaults from product requirements).
+/// Extraction / normalization options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExtractOptions {
-    pub min_lines: usize,
-    pub max_lines: usize,
     pub tab_width: usize,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
-        Self {
-            min_lines: 5,
-            max_lines: 40,
-            tab_width: 4,
-        }
+        Self { tab_width: 4 }
     }
 }
 
@@ -59,105 +53,41 @@ fn expand_tabs(line: &str, tab_width: usize) -> String {
     out
 }
 
-/// Hash normalized chunk body (SHA-256 hex).
+/// Hash normalized body (SHA-256 hex).
 pub fn hash_normalized(normalized: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-/// Extract chunks from source file text.
+/// Extract a single typing unit from source file text.
 ///
 /// Display line ranges use original 1-based line numbers of kept lines.
+/// Returns an empty vec when nothing remains after normalization.
 pub fn extract_chunks(relative_path: &str, original: &str, opts: ExtractOptions) -> Vec<Chunk> {
     let line_map = map_original_to_normalized_lines(original, opts.tab_width);
     if line_map.is_empty() {
         return Vec::new();
     }
 
-    let normalized_lines: Vec<&str> = line_map.iter().map(|(_, n)| n.as_str()).collect();
-    let blocks = split_into_chunks(&normalized_lines, opts.min_lines, opts.max_lines);
-
-    let mut chunks = Vec::new();
-    for block in blocks {
-        if block.is_empty() {
-            continue;
-        }
-        let body = block
-            .iter()
-            .map(|&i| normalized_lines[i])
-            .collect::<Vec<_>>()
-            .join("\n");
-        if body.trim().is_empty() {
-            continue;
-        }
-        let first = block[0];
-        let last = *block.last().unwrap();
-        chunks.push(Chunk {
-            relative_path: relative_path.to_string(),
-            start_line: line_map[first].0,
-            end_line: line_map[last].0,
-            hash: hash_normalized(&body),
-            normalized: body,
-        });
-    }
-    chunks
-}
-
-fn split_into_chunks(lines: &[&str], min_lines: usize, max_lines: usize) -> Vec<Vec<usize>> {
-    let min_lines = min_lines.max(1);
-    let max_lines = max_lines.max(min_lines);
-
-    let mut raw_blocks: Vec<Vec<usize>> = Vec::new();
-    let mut current: Vec<usize> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if line.is_empty() {
-            if !current.is_empty() {
-                raw_blocks.push(std::mem::take(&mut current));
-            }
-        } else {
-            current.push(i);
-        }
-    }
-    if !current.is_empty() {
-        raw_blocks.push(current);
+    let body = line_map
+        .iter()
+        .map(|(_, n)| n.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.trim().is_empty() {
+        return Vec::new();
     }
 
-    let mut sized: Vec<Vec<usize>> = Vec::new();
-    for block in raw_blocks {
-        if block.len() <= max_lines {
-            sized.push(block);
-        } else {
-            for piece in block.chunks(max_lines) {
-                sized.push(piece.to_vec());
-            }
-        }
-    }
-
-    // Absorb undersized blocks into the previous chunk when possible.
-    let mut merged: Vec<Vec<usize>> = Vec::new();
-    for block in sized {
-        if block.len() < min_lines {
-            if let Some(prev) = merged.last_mut() {
-                prev.extend(block);
-                continue;
-            }
-        }
-        merged.push(block);
-    }
-
-    // Absorb a trailing undersized block into the previous one.
-    if merged.len() >= 2 {
-        if let Some(last_len) = merged.last().map(Vec::len) {
-            if last_len < min_lines {
-                let last = merged.pop().unwrap();
-                merged.last_mut().unwrap().extend(last);
-            }
-        }
-    }
-
-    // Single undersized file: keep as one chunk so tiny fixtures remain typeable.
-    merged
+    let start_line = line_map[0].0;
+    let end_line = line_map[line_map.len() - 1].0;
+    vec![Chunk {
+        relative_path: relative_path.to_string(),
+        start_line,
+        end_line,
+        hash: hash_normalized(&body),
+        normalized: body,
+    }]
 }
 
 fn map_original_to_normalized_lines(original: &str, tab_width: usize) -> Vec<(u32, String)> {
@@ -197,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_on_blank_lines_with_min() {
+    fn whole_file_is_one_unit_across_blank_lines() {
         let mut src = String::new();
         for i in 0..5 {
             src.push_str(&format!("a{i}\n"));
@@ -207,46 +137,32 @@ mod tests {
             src.push_str(&format!("b{i}\n"));
         }
         let chunks = extract_chunks("f.rs", &src, ExtractOptions::default());
-        assert_eq!(chunks.len(), 2);
-    }
-
-    #[test]
-    fn absorbs_small_block() {
-        let mut src = String::new();
-        for i in 0..5 {
-            src.push_str(&format!("a{i}\n"));
-        }
-        src.push('\n');
-        src.push_str("tiny\n");
-        let chunks = extract_chunks("f.rs", &src, ExtractOptions::default());
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].normalized.contains("tiny"));
+        assert!(chunks[0].normalized.contains("a0"));
+        assert!(chunks[0].normalized.contains("b4"));
     }
 
     #[test]
-    fn mechanical_split_over_max() {
+    fn long_file_is_not_split() {
         let mut src = String::new();
         for i in 0..90 {
             src.push_str(&format!("line{i}\n"));
         }
-        let chunks = extract_chunks(
-            "f.rs",
-            &src,
-            ExtractOptions {
-                min_lines: 5,
-                max_lines: 40,
-                tab_width: 4,
-            },
-        );
-        assert!(chunks.len() >= 2);
-        for c in &chunks {
-            assert!(c.normalized.lines().count() <= 40);
-        }
+        let chunks = extract_chunks("f.rs", &src, ExtractOptions::default());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].normalized.split('\n').count(), 91);
     }
 
     #[test]
-    fn tiny_file_still_one_chunk() {
+    fn tiny_file_still_one_unit() {
         let chunks = extract_chunks("f.rs", "a\nb\n", ExtractOptions::default());
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn hash_matches_normalized_body() {
+        let chunks = extract_chunks("f.rs", "fn main() {}\n", ExtractOptions::default());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].hash, hash_normalized(&chunks[0].normalized));
     }
 }
