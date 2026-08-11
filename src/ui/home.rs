@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::store::{GlobalSummary, RecentRepo};
 use crate::ui::search::SearchState;
-use crate::ui::splash::LOGO;
+use crate::ui::splash::{self, LOGO};
 use crate::ui::theme;
 
 #[derive(Debug, Clone)]
@@ -42,7 +42,7 @@ impl HomeView {
     }
 }
 
-pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView) {
+pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms: u64) {
     theme::fill_background(frame, area);
 
     let chunks = Layout::default()
@@ -56,7 +56,7 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView) {
         ])
         .split(area);
 
-    draw_logo(frame, chunks[0]);
+    splash::draw_animated_logo(frame, chunks[0], logo_elapsed_ms);
     draw_summary(frame, chunks[1], &view.summary);
     draw_recent(frame, chunks[2], view);
     if let Some(err) = &view.error {
@@ -86,49 +86,6 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView) {
         ])),
         chunks[4],
     );
-}
-
-fn draw_logo(frame: &mut Frame, area: Rect) {
-    let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let target = theme::centered_rect(area, logo_width.min(area.width), LOGO.len() as u16);
-    let lines: Vec<Line> = LOGO
-        .iter()
-        .enumerate()
-        .map(|(row, art)| {
-            let spans: Vec<Span> = art
-                .chars()
-                .enumerate()
-                .map(|(col, ch)| {
-                    let color = logo_gradient(col, art.chars().count());
-                    // Subtle vertical dimming for depth without animation.
-                    let t = row as f32 / (LOGO.len().saturating_sub(1).max(1) as f32);
-                    let color = theme::lerp(color, theme::MUTED, t * 0.15);
-                    Span::styled(
-                        ch.to_string(),
-                        Style::default()
-                            .fg(color)
-                            .bg(theme::BG)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                })
-                .collect();
-            Line::from(spans)
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), target);
-}
-
-fn logo_gradient(col: usize, width: usize) -> ratatui::style::Color {
-    let t = if width <= 1 {
-        0.0
-    } else {
-        col as f32 / (width - 1) as f32
-    };
-    if t < 0.5 {
-        theme::lerp(theme::MAGENTA, theme::BLUE, t * 2.0)
-    } else {
-        theme::lerp(theme::BLUE, theme::CYAN, (t - 0.5) * 2.0)
-    }
 }
 
 fn draw_summary(frame: &mut Frame, area: Rect, summary: &GlobalSummary) {

@@ -64,15 +64,16 @@ pub fn splash_frame(elapsed_ms: u64) -> SplashFrame {
     }
 }
 
-pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &str) {
-    theme::fill_background(frame, area);
+/// Maximum logo width in characters (all rows share the same width).
+pub fn logo_width() -> usize {
+    LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0)
+}
+
+/// Animated ASCII logo lines (reveal + glow), without tagline.
+pub fn logo_lines(elapsed_ms: u64) -> Vec<Line<'static>> {
     let state = splash_frame(elapsed_ms);
-
-    let logo_width = LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let height = LOGO.len() as u16 + 3;
-    let target = theme::centered_rect(area, logo_width as u16, height);
-
-    let mut lines: Vec<Line> = Vec::new();
+    let width = logo_width();
+    let mut lines: Vec<Line> = Vec::with_capacity(LOGO.len());
     for (row, art) in LOGO.iter().enumerate() {
         if row >= state.visible_rows {
             lines.push(Line::from(""));
@@ -83,12 +84,12 @@ pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &s
             .chars()
             .enumerate()
             .map(|(col, ch)| {
-                let base = gradient_color(col, logo_width);
+                let base = gradient_color(col, width);
                 let mut color = base;
                 if just_revealed {
                     color = theme::BRIGHT;
                 } else if state.glow_phase > 0.0 && state.glow_phase < 1.0 {
-                    let sweep_col = state.glow_phase * logo_width as f32;
+                    let sweep_col = state.glow_phase * width as f32;
                     let dist = (col as f32 - sweep_col).abs();
                     let w = (1.0 - dist / 8.0).clamp(0.0, 1.0);
                     color = theme::lerp(base, theme::BRIGHT, w);
@@ -104,10 +105,28 @@ pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &s
             .collect();
         lines.push(Line::from(spans));
     }
+    lines
+}
 
+/// Draw the animated logo centered in `area` (logo only).
+pub fn draw_animated_logo(frame: &mut Frame, area: Rect, elapsed_ms: u64) {
+    let width = logo_width() as u16;
+    let target = theme::centered_rect(area, width.min(area.width), LOGO.len() as u16);
+    frame.render_widget(Paragraph::new(logo_lines(elapsed_ms)), target);
+}
+
+pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &str) {
+    theme::fill_background(frame, area);
+    let state = splash_frame(elapsed_ms);
+
+    let width = logo_width();
+    let height = LOGO.len() as u16 + 3;
+    let target = theme::centered_rect(area, width as u16, height);
+
+    let mut lines = logo_lines(elapsed_ms);
     lines.push(Line::from(""));
     let tagline = format!("v{}  —  {}", env!("CARGO_PKG_VERSION"), repo_name);
-    let pad = logo_width.saturating_sub(tagline.chars().count()) / 2;
+    let pad = width.saturating_sub(tagline.chars().count()) / 2;
     lines.push(Line::from(Span::styled(
         format!("{}{}", " ".repeat(pad), tagline),
         Style::default()
@@ -115,7 +134,7 @@ pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &s
             .bg(theme::BG),
     )));
     let hint = "press any key";
-    let pad = logo_width.saturating_sub(hint.chars().count()) / 2;
+    let pad = width.saturating_sub(hint.chars().count()) / 2;
     lines.push(Line::from(Span::styled(
         format!("{}{}", " ".repeat(pad), hint),
         Style::default()

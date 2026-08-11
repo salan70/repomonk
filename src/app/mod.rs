@@ -125,6 +125,10 @@ impl App {
             self.screen = Screen::Splash;
             self.splash_started = Some(Instant::now());
         }
+        // Home path: always play the logo reveal/glow on the title screen.
+        if matches!(self.screen, Screen::Home | Screen::Search) {
+            self.splash_started = Some(Instant::now());
+        }
 
         loop {
             let now_ms = now_millis();
@@ -144,14 +148,20 @@ impl App {
                 .splash_started
                 .map(|t| t.elapsed().as_millis() as u64)
                 .unwrap_or(0);
+            // Home logo uses the same timeline; `--no-fx` shows the fully revealed logo.
+            let home_logo_elapsed = if self.cfg.fx_enabled {
+                splash_elapsed
+            } else {
+                SPLASH_TOTAL_MS
+            };
             {
                 let term = guard.terminal();
                 term.draw(|frame| {
                     let area = frame.area();
                     match self.screen {
-                        Screen::Home => draw_home(frame, area, &self.home),
+                        Screen::Home => draw_home(frame, area, &self.home, home_logo_elapsed),
                         Screen::Search => {
-                            draw_home(frame, area, &self.home);
+                            draw_home(frame, area, &self.home, home_logo_elapsed);
                             draw_search_modal(frame, area, &self.search);
                         }
                         Screen::Stats => {
@@ -349,6 +359,7 @@ impl App {
             KeyCode::Esc => {
                 self.stats = None;
                 self.screen = Screen::Home;
+                self.splash_started = Some(Instant::now());
                 Ok(false)
             }
             _ => Ok(false),
@@ -468,6 +479,7 @@ impl App {
         self.search = SearchState::default();
         self.reload_home_data()?;
         self.screen = Screen::Home;
+        self.splash_started = Some(Instant::now());
         Ok(())
     }
 
