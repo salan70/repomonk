@@ -1,0 +1,30 @@
+# Rust build output
+/target/
+
+# Local application data and databases
+/.repomonk/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Secrets and local environment overrides
+.env
+.env.*
+!.env.example
+
+# Coverage and profiling output
+/coverage/
+*.profraw
+*.profdata
+
+# Editors and operating systems
+.DS_Store
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.log
