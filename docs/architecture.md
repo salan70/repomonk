@@ -37,9 +37,15 @@ src/
     sqlite.rs          スキーマ、進捗・セッション保存
   ui/
     terminal.rs        raw modeとalternate screenの生存期間
+    home.rs            ホーム（ロゴ、Recent、Summary）
+    search.rs          Searchモーダル用の候補生成
+    splash.rs          引数あり起動時のスプラッシュ
+    stats.rs           達成サマリ画面
     tree.rs            ファイルツリー
     typing.rs          写経画面
     result.rs          リザルト画面
+    fx.rs              カーソル演出
+    theme.rs           Tokyo Night配色
 tests/
   fixtures/            小さな疑似リポジトリ
   cli.rs
@@ -75,8 +81,9 @@ Store  ──► Domain
   表示行範囲、正規化本文、SHA-256を持つ。
 - `TypingEngine`: コマンドと時刻を受け、描画可能なスナップショットを返す。
 - `ProgressStore`: リポジトリ、ファイル、ファイル本文、セッションを保存・復元する。
-- `App`: Tree、Typing、Resultの遷移とユースケースを所有する。チャンク一覧画面は
-  持たない。
+- `App`: Home / Search / Stats / Splash / Tree / Typing / Result の遷移と
+  ユースケースを所有する。チャンク一覧画面は持たない。リポジトリ未ロード時は
+  Home系画面のみを表示する。
 
 打鍵エンジンへの入力は、文字、Enter、Backspace、Escape、時間更新へ正規化します。
 エンジンは受理位置、期待文字、ミス表示期限、完了・中断状態、計測値を返します。
@@ -100,11 +107,15 @@ MVPでは、少なくとも次の情報を永続化します。
 
 ### 起動
 
-1. CLIがURLまたはローカルパスを検証する。
-2. Sourceが利用可能なローカルルートを返す。
-3. Scannerが対象判定とファイル本文抽出を行う。
-4. Storeがハッシュで既存進捗を対応付ける。
-5. AppがTree状態を構築し、UIを開始する。
+1. 引数なしの場合、AppはHomeを開き、RecentとSummaryをStoreから読む。
+2. 引数ありの場合、CLIがURLまたはローカルパスを検証し、Homeを省略する。
+3. Sourceが利用可能なローカルルートを返す。
+4. Scannerが対象判定とファイル本文抽出を行う。
+5. Storeがハッシュで既存進捗を対応付ける。
+6. AppがTree状態を構築し、UIを開始する（`--no-fx`でなければSplashを挟む）。
+
+HomeのSearchはGitHub URL / `owner/repo`、またはローカルRecent・キャッシュ名の
+あいまい一致だけを受け付ける。外部APIは使わない。
 
 ### ファイル完走
 
@@ -113,7 +124,7 @@ MVPでは、少なくとも次の情報を永続化します。
 3. TypingEngineが入力を判定し、状態を更新する。
 4. 完走時にAppがセッションとファイル完了を1トランザクションで保存する。
 5. Appが行数ベースで集計し直してResultを表示する。
-6. Treeへ戻ると更新済み進捗が表示される。
+6. Esc / `t` / `r` でTreeへ戻ると更新済み進捗が表示される。EnterはHomeへ戻る。
 
 ### 中断
 

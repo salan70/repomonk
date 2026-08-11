@@ -33,9 +33,14 @@ fn run() -> repomonk::Result<()> {
     }
 
     let Some(target) = cli.target else {
-        return Err(Error::InvalidInput(
-            "pass a GitHub URL, owner/repo, or local path (see --help)".into(),
-        ));
+        let cfg = AppConfig {
+            cache_dir: paths.cache_dir.clone(),
+            db_path: paths.db_path.clone(),
+            refresh: cli.refresh,
+            fx_enabled: !cli.no_fx,
+        };
+        let mut app = App::home(&cfg)?;
+        return app.run();
     };
 
     let cfg = AppConfig {

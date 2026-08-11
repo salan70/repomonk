@@ -1,8 +1,9 @@
 //! SQLite persistence for repositories, chunks, and sessions.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::domain::content::{
@@ -10,6 +11,27 @@ use crate::domain::content::{
     ScanResult, SessionSummary, SkipReason,
 };
 use crate::Error;
+
+/// A previously opened repository for the home Recent list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentRepo {
+    pub id: i64,
+    pub identity: String,
+    pub display_name: String,
+    pub input: String,
+    pub root_path: String,
+    pub last_opened_at: String,
+    pub done_lines: usize,
+    pub total_lines: usize,
+}
+
+/// Aggregate achievement stats across all repositories.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GlobalSummary {
+    pub completed_files: usize,
+    pub completed_chunks: usize,
+    pub streak_days: u32,
+}
 
 const SCHEMA: &str = r#"
 PRAGMA foreign_keys = ON;
@@ -348,6 +370,144 @@ impl SqliteStore {
         )?;
         Ok(())
     }
+
+    /// Repositories ordered by most recently opened, with line progress attached.
+    pub fn list_recent_repos(&self, limit: usize) -> crate::Result<Vec<RecentRepo>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, identity, display_name, input, root_path, last_opened_at
+            FROM repositories
+            ORDER BY last_opened_at DESC
+            LIMIT ?1
+            "#,
+        )?;
+        let rows: Vec<(i64, String, String, String, String, String)> = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, identity, display_name, input, root_path, last_opened_at) in rows {
+            let (done_lines, total_lines) = self.repo_line_progress(id)?;
+            out.push(RecentRepo {
+                id,
+                identity,
+                display_name,
+                input,
+                root_path,
+                last_opened_at,
+                done_lines,
+                total_lines,
+            });
+        }
+        Ok(out)
+    }
+
+    /// `(completed_lines, total_lines)` for non-skipped files in a repository.
+    pub fn repo_line_progress(&self, repo_id: i64) -> crate::Result<(usize, usize)> {
+        let progress = self.load_progress(repo_id)?;
+        Ok((progress.completed_lines(), progress.total_lines()))
+    }
+
+    /// Completed files / chunks across all repos, plus consecutive activity days.
+    pub fn global_summary(&self) -> crate::Result<GlobalSummary> {
+        let completed_chunks: i64 = self.conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM chunk_progress p
+            JOIN chunks c ON c.id = p.chunk_id
+            WHERE p.completed = 1 AND c.active = 1
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+
+        // A file is complete when it has ≥1 active chunk and all are completed,
+        // and it is not skipped.
+        let completed_files: i64 = self.conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM (
+                SELECT f.id
+                FROM repo_files f
+                JOIN chunks c ON c.file_id = f.id AND c.active = 1
+                LEFT JOIN chunk_progress p ON p.chunk_id = c.id
+                WHERE f.skip_reason IS NULL
+                GROUP BY f.id
+                HAVING COUNT(c.id) > 0
+                   AND SUM(CASE WHEN COALESCE(p.completed, 0) = 1 THEN 1 ELSE 0 END) = COUNT(c.id)
+            )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+
+        let mut dates = BTreeSet::new();
+        {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT ended_at FROM sessions WHERE completed = 1
+                "#,
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for ended in rows {
+                let ended = ended?;
+                if let Some(day) = parse_session_day(&ended) {
+                    dates.insert(day);
+                }
+            }
+        }
+
+        Ok(GlobalSummary {
+            completed_files: completed_files as usize,
+            completed_chunks: completed_chunks as usize,
+            streak_days: compute_streak(&dates, Utc::now().date_naive()),
+        })
+    }
+}
+
+/// Parse an RFC3339 (or date-prefixed) timestamp into a calendar day.
+fn parse_session_day(ended_at: &str) -> Option<NaiveDate> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ended_at) {
+        return Some(dt.date_naive());
+    }
+    // Fallback: leading YYYY-MM-DD.
+    if ended_at.len() >= 10 {
+        return NaiveDate::parse_from_str(&ended_at[..10], "%Y-%m-%d").ok();
+    }
+    None
+}
+
+/// Consecutive days with activity ending on `today` or `yesterday`.
+fn compute_streak(dates: &BTreeSet<NaiveDate>, today: NaiveDate) -> u32 {
+    if dates.is_empty() {
+        return 0;
+    }
+    let yesterday = today.pred_opt().unwrap_or(today);
+    let start = if dates.contains(&today) {
+        today
+    } else if dates.contains(&yesterday) {
+        yesterday
+    } else {
+        return 0;
+    };
+    let mut streak = 0u32;
+    let mut cursor = start;
+    while dates.contains(&cursor) {
+        streak += 1;
+        match cursor.pred_opt() {
+            Some(prev) => cursor = prev,
+            None => break,
+        }
+    }
+    streak
 }
 
 fn upsert_repository(
@@ -622,5 +782,95 @@ mod tests {
         purge(&paths).unwrap();
         assert!(!cache.exists());
         assert!(!data.exists());
+    }
+
+    #[test]
+    fn list_recent_orders_by_last_opened() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let body = "fn main() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n";
+        let scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "src/main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("src/main.rs", body)],
+            }],
+        };
+        let older = ResolvedRepository {
+            identity: "local:/tmp/older".into(),
+            display_name: "older".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/older".into(),
+            input: "/tmp/older".into(),
+        };
+        let newer = ResolvedRepository {
+            identity: "local:/tmp/newer".into(),
+            display_name: "newer".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/newer".into(),
+            input: "/tmp/newer".into(),
+        };
+        let (older_id, _) = store.sync_scan(&older, &scan).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (_newer_id, _) = store.sync_scan(&newer, &scan).unwrap();
+        // Touch older so it becomes most recent.
+        store.touch_repository(older_id).unwrap();
+
+        let recent = store.list_recent_repos(10).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].display_name, "older");
+        assert_eq!(recent[1].display_name, "newer");
+        assert!(recent[0].total_lines >= 5);
+        assert_eq!(recent[0].done_lines, 0);
+    }
+
+    #[test]
+    fn global_summary_counts_completions_and_streak() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let body = "fn main() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n";
+        let repo = ResolvedRepository {
+            identity: "local:/tmp/demo".into(),
+            display_name: "demo".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/demo".into(),
+            input: "/tmp/demo".into(),
+        };
+        let scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "src/main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("src/main.rs", body)],
+            }],
+        };
+        let (_, progress) = store.sync_scan(&repo, &scan).unwrap();
+        let chunk_id = progress.files[0].chunks[0].id.unwrap();
+        let today = Utc::now().to_rfc3339();
+        store
+            .record_session(&SessionSummary {
+                chunk_id,
+                started_at: today.clone(),
+                ended_at: today,
+                completed: true,
+                keystrokes: 10,
+                misses: 0,
+                elapsed_ms: 100,
+            })
+            .unwrap();
+
+        let summary = store.global_summary().unwrap();
+        assert_eq!(summary.completed_chunks, 1);
+        assert_eq!(summary.completed_files, 1);
+        assert!(summary.streak_days >= 1);
+    }
+
+    #[test]
+    fn compute_streak_allows_yesterday_start() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 11).unwrap();
+        let mut dates = BTreeSet::new();
+        dates.insert(NaiveDate::from_ymd_opt(2026, 8, 10).unwrap());
+        dates.insert(NaiveDate::from_ymd_opt(2026, 8, 9).unwrap());
+        assert_eq!(compute_streak(&dates, today), 2);
+        assert_eq!(compute_streak(&BTreeSet::new(), today), 0);
     }
 }

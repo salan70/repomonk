@@ -70,7 +70,7 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
         metric("misses", format!("{}", m.misses)),
         metric("time", format!("{:.1}s", m.elapsed_ms as f64 / 1000.0)),
         Line::from(""),
-        theme::key_hints(&[("Enter/Esc", "back to tree"), ("q", "quit")])
+        theme::key_hints(&[("Enter", "home"), ("Esc/t/r", "tree"), ("q", "quit")])
             .alignment(Alignment::Center),
     ];
     frame.render_widget(Paragraph::new(lines), inner);

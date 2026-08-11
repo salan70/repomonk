@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "repomonk", version, about = "Type through real repositories")]
 pub struct Cli {
-    /// GitHub URL, owner/repo, or local path.
+    /// GitHub URL, owner/repo, or local path. Omit to open the home screen.
     pub target: Option<String>,
 
     /// Re-clone / re-scan GitHub cache.

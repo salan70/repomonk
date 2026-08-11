@@ -17,7 +17,9 @@ URL / ローカルrepo
 
 ## 2. MVPに含めるもの
 
-- `repomonk <GitHub URL | ローカルパス>`からの直接起動
+- `repomonk`（引数なし）でのHome起動、および
+  `repomonk <GitHub URL | ローカルパス>`からの直接起動（Home省略）
+- HomeのRecent / Summary、Searchモーダル（ローカル候補のみ）、達成サマリ（`g`）
 - system `git`によるshallow cloneとキャッシュ再利用
 - リポジトリ走査、自動対象外判定、対象外理由
 - 共通規則による正規化とファイル全文の写経単位抽出
@@ -35,18 +37,19 @@ URL / ローカルrepo
 
 ## 3. MVPに含めないもの
 
-- Home、Recent、Searchモーダル、Prepare、`--last`
+- Prepare進捗画面、`--last`、`stats`サブコマンド
 - tree-sitterと言語別行ラベル、import・コメントの設定フィルタ
 - dependency / directoryモードと依存グラフ
 - 手動skip、ツリー内検索、絞り込み、ソート切り替え
 - 変更マーク、消えたファイル履歴などrefreshの詳細UI
-- 統計画面、連続日数、2-gram、詳細なミス分析
+- フル統計画面（草、速度ヒートマップ、2-gram、詳細なミス分析）
 - 設定ファイルによるカスタマイズ
 - 並列スキャンの最適化
-- カーソルグロー、イナズマ、描画スレッド分離
+- 描画スレッド分離
 - 周回と完了ファイルの再挑戦UI（完了済みを再度開くこと自体は許容）
 
 MVP外の項目は削除ではなく、MVP後のバックログです。
+（Home / Search / 達成サマリ、および演出・Splashはユーザー指示により実装済み。）
 
 ## 4. AIエージェントの担当
 

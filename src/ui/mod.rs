@@ -1,6 +1,9 @@
 pub mod fx;
+pub mod home;
 pub mod result;
+pub mod search;
 pub mod splash;
+pub mod stats;
 pub mod terminal;
 pub mod theme;
 pub mod tree;

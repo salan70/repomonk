@@ -15,11 +15,14 @@ fn help_exits_zero() {
 }
 
 #[test]
-fn missing_target_errors() {
-    let out = bin().output().unwrap();
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("error:"));
+fn help_mentions_optional_target() {
+    let out = bin().arg("--help").output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Omit to open the home screen") || stdout.contains("[TARGET]"),
+        "{stdout}"
+    );
 }
 
 #[test]
