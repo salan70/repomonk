@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use repomonk::app::{App, AppConfig};
 use repomonk::cli::Cli;
+use repomonk::config::{default_config_path, load as load_user_config};
 use repomonk::store::{purge, DataPaths};
 use repomonk::Error;
 
@@ -32,23 +33,22 @@ fn run() -> repomonk::Result<()> {
         return run_purge(&paths, cli.yes);
     }
 
-    let Some(target) = cli.target else {
-        let cfg = AppConfig {
-            cache_dir: paths.cache_dir.clone(),
-            db_path: paths.db_path.clone(),
-            refresh: cli.refresh,
-            fx_enabled: !cli.no_fx,
-        };
-        let mut app = App::home(&cfg)?;
-        return app.run();
-    };
-
+    let config_path = default_config_path()?;
+    let user = load_user_config(&config_path)?;
     let cfg = AppConfig {
         cache_dir: paths.cache_dir.clone(),
         db_path: paths.db_path.clone(),
         refresh: cli.refresh,
-        fx_enabled: !cli.no_fx,
+        no_fx: cli.no_fx,
+        user,
+        config_path,
     };
+
+    let Some(target) = cli.target else {
+        let mut app = App::home(&cfg)?;
+        return app.run();
+    };
+
     let mut app = App::open(&target, &cfg)?;
     app.run()
 }

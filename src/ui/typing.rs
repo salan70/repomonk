@@ -20,6 +20,7 @@ fn tier_color(tier: u8) -> Color {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw_typing(
     frame: &mut Frame,
     area: Rect,
@@ -28,6 +29,7 @@ pub fn draw_typing(
     snap: &TypingSnapshot,
     now_ms: u64,
     fx: Option<&FxState>,
+    show_live_speed: bool,
 ) {
     theme::fill_background(frame, area);
 
@@ -84,7 +86,13 @@ pub fn draw_typing(
     let total_lines = lines.len().max(1);
     let current_line = line_index_at(&lines, snap.cursor) + 1;
     frame.render_widget(
-        Paragraph::new(status_line(snap, current_line, total_lines, fx)),
+        Paragraph::new(status_line(
+            snap,
+            current_line,
+            total_lines,
+            fx,
+            show_live_speed,
+        )),
         panes[2],
     );
 }
@@ -94,6 +102,7 @@ fn status_line(
     current_line: usize,
     total_lines: usize,
     fx: Option<&FxState>,
+    show_live_speed: bool,
 ) -> Line<'static> {
     let sep = || Span::styled("  │  ", Style::default().fg(theme::BORDER));
     let mut spans = vec![
@@ -112,6 +121,18 @@ fn status_line(
             }),
         ),
     ];
+    if show_live_speed {
+        let metrics = crate::domain::content::TypingMetrics::from_counts(
+            snap.keystrokes,
+            snap.misses,
+            snap.elapsed_ms,
+        );
+        spans.push(sep());
+        spans.push(Span::styled(
+            format!("{:.0} kpm", metrics.kpm),
+            Style::default().fg(theme::YELLOW),
+        ));
+    }
     if let Some(fx) = fx {
         let tier = fx.tier();
         let style = if tier > 0 {

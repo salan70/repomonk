@@ -39,6 +39,9 @@ pub enum Error {
     PurgeCancelled,
 
     #[error("{0}")]
+    Config(String),
+
+    #[error("{0}")]
     Message(String),
 }
 
@@ -55,7 +58,7 @@ impl Error {
             | Self::NoChunks => 2,
             Self::GitNotFound | Self::GitClone(_) | Self::Git(_) => 3,
             Self::Database(_) => 4,
-            Self::Io(_) | Self::Terminal(_) | Self::Message(_) => 1,
+            Self::Io(_) | Self::Terminal(_) | Self::Config(_) | Self::Message(_) => 1,
         }
     }
 }

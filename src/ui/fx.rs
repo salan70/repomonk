@@ -5,6 +5,7 @@
 //! successive [`TypingSnapshot`]s, so the typing engine stays untouched and
 //! effects can never alter core behavior.
 
+use crate::config::FxIntensity;
 use crate::domain::typing::TypingSnapshot;
 
 /// Base afterglow lifetime for a freshly typed character.
@@ -32,18 +33,43 @@ pub struct LineTrail {
     pub until_ms: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct FxState {
     prev_cursor: Option<usize>,
     prev_misses: u32,
     streak: u32,
     glows: Vec<Afterglow>,
     trails: Vec<LineTrail>,
+    intensity: FxIntensity,
+}
+
+impl Default for FxState {
+    fn default() -> Self {
+        Self {
+            prev_cursor: None,
+            prev_misses: 0,
+            streak: 0,
+            glows: Vec::new(),
+            trails: Vec::new(),
+            intensity: FxIntensity::Normal,
+        }
+    }
 }
 
 impl FxState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_intensity(intensity: FxIntensity) -> Self {
+        Self {
+            intensity,
+            ..Self::default()
+        }
+    }
+
+    pub fn set_intensity(&mut self, intensity: FxIntensity) {
+        self.intensity = intensity;
     }
 
     /// Current no-miss streak (accepted keystrokes since the last miss).
@@ -59,9 +85,26 @@ impl FxState {
             .count() as u8
     }
 
+    fn scale_ms(&self, base: u64) -> u64 {
+        let scale = self.intensity.lifetime_scale();
+        if scale <= 0.0 {
+            0
+        } else {
+            ((base as f32) * scale).round() as u64
+        }
+    }
+
     /// Ingest the latest snapshot, deriving keystroke / newline / miss events
     /// from the difference with the previously observed snapshot.
     pub fn observe(&mut self, snap: &TypingSnapshot, now_ms: u64) {
+        if self.intensity == FxIntensity::Off {
+            self.prev_cursor = Some(snap.cursor);
+            self.prev_misses = snap.misses;
+            self.glows.clear();
+            self.trails.clear();
+            return;
+        }
+
         if snap.misses > self.prev_misses {
             self.streak = 0;
         }
@@ -73,24 +116,27 @@ impl FxState {
                 // advanced the cursor; do not emit effects for it.
             }
             Some(prev) if snap.cursor > prev => {
-                let glow_ms = GLOW_BASE_MS + GLOW_TIER_BONUS_MS * self.tier() as u64;
+                let glow_ms = self.scale_ms(GLOW_BASE_MS + GLOW_TIER_BONUS_MS * self.tier() as u64);
+                let trail_ms = self.scale_ms(TRAIL_MS);
                 let chars: Vec<char> = snap.target.chars().collect();
                 for idx in prev..snap.cursor {
                     let auto = snap.auto_inserted.binary_search(&idx).is_ok();
                     if !auto {
                         self.streak = self.streak.saturating_add(1);
-                        self.glows.push(Afterglow {
-                            index: idx,
-                            start_ms: now_ms,
-                            until_ms: now_ms + glow_ms,
-                        });
+                        if glow_ms > 0 {
+                            self.glows.push(Afterglow {
+                                index: idx,
+                                start_ms: now_ms,
+                                until_ms: now_ms + glow_ms,
+                            });
+                        }
                     }
-                    if chars.get(idx) == Some(&'\n') {
+                    if chars.get(idx) == Some(&'\n') && trail_ms > 0 {
                         let line = chars[..idx].iter().filter(|&&c| c == '\n').count();
                         self.trails.push(LineTrail {
                             line,
                             start_ms: now_ms,
-                            until_ms: now_ms + TRAIL_MS,
+                            until_ms: now_ms + trail_ms,
                         });
                     }
                 }

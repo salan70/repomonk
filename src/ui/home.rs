@@ -82,6 +82,7 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms
             ("Enter", "open"),
             ("s", "search"),
             ("g", "stats"),
+            ("c", "settings"),
             ("q", "quit"),
         ])),
         chunks[4],

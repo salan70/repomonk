@@ -11,6 +11,8 @@ use crate::scan::extract::{extract_chunks, ExtractOptions};
 pub struct WalkOptions {
     pub max_line_cols: usize,
     pub max_file_lines: usize,
+    pub include_tests: bool,
+    pub include_configs: bool,
     pub extract: ExtractOptions,
 }
 
@@ -19,6 +21,8 @@ impl Default for WalkOptions {
         Self {
             max_line_cols: 200,
             max_file_lines: 5_000,
+            include_tests: false,
+            include_configs: false,
             extract: ExtractOptions::default(),
         }
     }
@@ -58,6 +62,53 @@ const LOCK_OR_GENERATED: &[&str] = &[
 const GENERATED_SUFFIXES: &[&str] = &[
     ".min.js", ".min.css", ".map", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
     ".pdf", ".zip", ".gz", ".tar", ".wasm", ".so", ".dylib", ".dll", ".exe", ".o", ".a",
+];
+
+const TEST_DIR_SEGMENTS: &[&str] = &["test", "tests", "__tests__", "spec", "specs"];
+
+const CONFIG_NAMES: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.toml.orig",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "jsconfig.json",
+    "pyproject.toml",
+    "setup.cfg",
+    "setup.py",
+    "Pipfile",
+    "poetry.toml",
+    "go.mod",
+    "go.sum",
+    "Gemfile",
+    "Rakefile",
+    "Makefile",
+    "CMakeLists.txt",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    ".editorconfig",
+    ".gitignore",
+    ".gitattributes",
+    ".env",
+    ".env.example",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".eslintrc.cjs",
+    ".eslintrc.json",
+    ".prettierrc",
+    ".prettierrc.js",
+    ".prettierrc.json",
+    "prettier.config.js",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    "clippy.toml",
+    "rustfmt.toml",
+    ".rustfmt.toml",
+];
+
+const CONFIG_EXTENSIONS: &[&str] = &[
+    ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".config", ".jsonc", ".env",
 ];
 
 /// Scan `root` recursively without following symlinks.
@@ -134,6 +185,14 @@ fn classify_file(root: &Path, path: &Path, opts: &WalkOptions) -> ScannedFile {
         return skipped(relative, SkipReason::VcsOrDependencyDir);
     }
 
+    if !opts.include_tests && is_test_path(&relative, &name) {
+        return skipped(relative, SkipReason::TestFile);
+    }
+
+    if !opts.include_configs && is_config_path(&relative, &name) {
+        return skipped(relative, SkipReason::ConfigFile);
+    }
+
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(err) => return skipped(relative, SkipReason::IoError(err.to_string())),
@@ -173,6 +232,49 @@ fn classify_file(root: &Path, path: &Path, opts: &WalkOptions) -> ScannedFile {
         skip_reason: None,
         chunks,
     }
+}
+
+fn is_test_path(relative: &str, name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if relative
+        .split('/')
+        .any(|seg| TEST_DIR_SEGMENTS.contains(&seg.to_ascii_lowercase().as_str()))
+    {
+        return true;
+    }
+    if lower.ends_with("_test.rs")
+        || lower.ends_with("_test.go")
+        || lower.ends_with("_test.py")
+        || lower.ends_with("_spec.rb")
+        || lower.ends_with("_spec.ts")
+        || lower.ends_with("_spec.js")
+        || lower.ends_with(".test.ts")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".test.js")
+        || lower.ends_with(".test.jsx")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.tsx")
+        || lower.ends_with(".spec.js")
+        || lower.ends_with(".spec.jsx")
+        || lower.starts_with("test_")
+    {
+        return true;
+    }
+    false
+}
+
+fn is_config_path(relative: &str, name: &str) -> bool {
+    let _ = relative;
+    if CONFIG_NAMES.iter().any(|n| name.eq_ignore_ascii_case(n)) {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with(".env") {
+        return true;
+    }
+    CONFIG_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(ext) && !lower.ends_with(".lock"))
 }
 
 fn skipped(relative: String, reason: SkipReason) -> ScannedFile {
@@ -308,6 +410,92 @@ mod tests {
                     .files
                     .iter()
                     .all(|f| !f.relative_path.contains("secret"))
+        );
+    }
+
+    fn source_body() -> String {
+        let mut src = String::new();
+        for i in 0..6 {
+            src.push_str(&format!("fn f{i}() {{}}\n"));
+        }
+        src
+    }
+
+    #[test]
+    fn skips_tests_when_disabled() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), source_body()).unwrap();
+        fs::write(root.join("src/lib_test.rs"), source_body()).unwrap();
+        fs::create_dir(root.join("tests")).unwrap();
+        fs::write(root.join("tests/it.rs"), source_body()).unwrap();
+
+        let skipped = scan_repository(root, WalkOptions::default()).unwrap();
+        let test_file = skipped
+            .files
+            .iter()
+            .find(|f| f.relative_path == "src/lib_test.rs")
+            .unwrap();
+        assert_eq!(test_file.status, FileStatus::Skipped);
+        assert_eq!(test_file.skip_reason, Some(SkipReason::TestFile));
+        let in_tests = skipped
+            .files
+            .iter()
+            .find(|f| f.relative_path == "tests/it.rs")
+            .unwrap();
+        assert_eq!(in_tests.skip_reason, Some(SkipReason::TestFile));
+
+        let opts = WalkOptions {
+            include_tests: true,
+            ..WalkOptions::default()
+        };
+        let included = scan_repository(root, opts).unwrap();
+        assert_eq!(
+            included
+                .files
+                .iter()
+                .find(|f| f.relative_path == "src/lib_test.rs")
+                .unwrap()
+                .status,
+            FileStatus::Todo
+        );
+    }
+
+    #[test]
+    fn skips_configs_when_disabled() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), source_body()).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let skipped = scan_repository(root, WalkOptions::default()).unwrap();
+        let cargo = skipped
+            .files
+            .iter()
+            .find(|f| f.relative_path == "Cargo.toml")
+            .unwrap();
+        assert_eq!(cargo.status, FileStatus::Skipped);
+        assert_eq!(cargo.skip_reason, Some(SkipReason::ConfigFile));
+
+        let opts = WalkOptions {
+            include_configs: true,
+            ..WalkOptions::default()
+        };
+        let included = scan_repository(root, opts).unwrap();
+        assert_eq!(
+            included
+                .files
+                .iter()
+                .find(|f| f.relative_path == "Cargo.toml")
+                .unwrap()
+                .status,
+            FileStatus::Todo
         );
     }
 }

@@ -56,6 +56,7 @@ pub struct TypingEngine {
     started_at_ms: u64,
     now_ms: u64,
     allow_backspace: bool,
+    auto_indent: bool,
     tab_width: usize,
 }
 
@@ -64,12 +65,13 @@ const MISS_FLASH_MS: u64 = 150;
 impl TypingEngine {
     /// Create an engine for `normalized` chunk text.
     ///
-    /// Leading indentation on each line is auto-inserted when the cursor
-    /// reaches the start of that line (including the first line).
+    /// When `auto_indent` is true, leading indentation on each line is
+    /// auto-inserted when the cursor reaches the start of that line.
     pub fn new(
         normalized: &str,
         started_at_ms: u64,
         allow_backspace: bool,
+        auto_indent: bool,
         tab_width: usize,
     ) -> Self {
         let target: Vec<char> = normalized.chars().collect();
@@ -85,6 +87,7 @@ impl TypingEngine {
             started_at_ms,
             now_ms: started_at_ms,
             allow_backspace,
+            auto_indent,
             tab_width: tab_width.max(1),
         };
         engine.apply_auto_indent();
@@ -206,6 +209,9 @@ impl TypingEngine {
 
     /// Auto-insert leading spaces at the beginning of the current line.
     fn apply_auto_indent(&mut self) {
+        if !self.auto_indent {
+            return;
+        }
         if self.cursor >= self.target.len() {
             return;
         }
@@ -232,7 +238,7 @@ mod tests {
     use super::*;
 
     fn engine(text: &str) -> TypingEngine {
-        TypingEngine::new(text, 0, true, 4)
+        TypingEngine::new(text, 0, true, true, 4)
     }
 
     #[test]
@@ -330,5 +336,12 @@ mod tests {
         let m = e.metrics();
         assert_eq!(m.keystrokes, 1);
         assert!((m.kpm - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn auto_indent_can_be_disabled() {
+        let e = TypingEngine::new("  ab", 0, true, false, 4);
+        assert_eq!(e.snapshot().cursor, 0);
+        assert_eq!(e.snapshot().expected, Some(' '));
     }
 }

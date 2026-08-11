@@ -2,6 +2,7 @@ pub mod fx;
 pub mod home;
 pub mod result;
 pub mod search;
+pub mod settings;
 pub mod splash;
 pub mod stats;
 pub mod terminal;

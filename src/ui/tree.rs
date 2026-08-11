@@ -39,12 +39,13 @@ pub struct TreeView {
     pub collapsed: std::collections::HashSet<String>,
     /// Repository-wide `(completed, total)` normalized line counts.
     pub overall: (usize, usize),
+    pub hide_skipped: bool,
 }
 
 impl TreeView {
-    pub fn from_progress(repo_name: &str, progress: &RepoProgress) -> Self {
+    pub fn from_progress(repo_name: &str, progress: &RepoProgress, hide_skipped: bool) -> Self {
         let recommend = progress.recommend_path().map(str::to_string);
-        let rows = flatten(progress, &std::collections::HashSet::new());
+        let rows = flatten(progress, &std::collections::HashSet::new(), hide_skipped);
         Self {
             rows,
             selected: 0,
@@ -52,6 +53,7 @@ impl TreeView {
             title: repo_name.to_string(),
             collapsed: std::collections::HashSet::new(),
             overall: overall_progress(progress),
+            hide_skipped,
         }
     }
 
@@ -59,7 +61,7 @@ impl TreeView {
         self.recommend = progress.recommend_path().map(str::to_string);
         self.overall = overall_progress(progress);
         let prev_path = self.selected_file_path();
-        self.rows = flatten(progress, &self.collapsed);
+        self.rows = flatten(progress, &self.collapsed, self.hide_skipped);
         if let Some(path) = prev_path {
             if let Some(idx) = self
                 .rows
@@ -111,11 +113,18 @@ fn overall_progress(progress: &RepoProgress) -> (usize, usize) {
     (root.completed_lines, root.total_lines)
 }
 
-fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String>) -> Vec<TreeRow> {
+fn flatten(
+    progress: &RepoProgress,
+    collapsed: &std::collections::HashSet<String>,
+    hide_skipped: bool,
+) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     // Build a simple path-sorted expansion.
     let mut dirs: Vec<String> = Vec::new();
     for f in &progress.files {
+        if hide_skipped && f.derive_status() == FileStatus::Skipped {
+            continue;
+        }
         let parts: Vec<&str> = f.relative_path.split('/').collect();
         let mut acc = String::new();
         for (i, part) in parts.iter().enumerate() {
@@ -136,6 +145,9 @@ fn flatten(progress: &RepoProgress, collapsed: &std::collections::HashSet<String
     // Emit via DFS on sorted unique paths.
     let mut emitted_dirs = std::collections::HashSet::new();
     for f in &progress.files {
+        if hide_skipped && f.derive_status() == FileStatus::Skipped {
+            continue;
+        }
         let parts: Vec<&str> = f.relative_path.split('/').collect();
         let mut acc = String::new();
         let mut hidden = false;

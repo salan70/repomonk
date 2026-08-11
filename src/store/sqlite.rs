@@ -125,10 +125,14 @@ impl SqliteStore {
     }
 
     /// Upsert repository row and merge scan with existing chunk completions by hash.
+    ///
+    /// When `keep_done_on_refresh` is false, previously completed hashes are not
+    /// carried over even if content matches.
     pub fn sync_scan(
         &mut self,
         repo: &ResolvedRepository,
         scan: &ScanResult,
+        keep_done_on_refresh: bool,
     ) -> crate::Result<(i64, RepoProgress)> {
         let tx = self.conn.transaction()?;
         let now = Utc::now().to_rfc3339();
@@ -136,7 +140,7 @@ impl SqliteStore {
 
         // Existing completions: hash -> completed
         let mut completed_hashes = std::collections::HashSet::new();
-        {
+        if keep_done_on_refresh {
             let mut stmt = tx.prepare(
                 r#"
                 SELECT c.content_hash
@@ -573,6 +577,10 @@ fn parse_skip_reason(raw: &str) -> SkipReason {
         SkipReason::GeneratedOrLockFile
     } else if raw == "binary file" {
         SkipReason::Binary
+    } else if raw == "test file (include_tests=false)" {
+        SkipReason::TestFile
+    } else if raw == "config file (include_configs=false)" {
+        SkipReason::ConfigFile
     } else if raw == "no typeable chunks" || raw == "no typeable content" {
         SkipReason::NoChunks
     } else if let Some(rest) = raw.strip_prefix("line longer than ") {
@@ -722,7 +730,7 @@ mod tests {
                 chunks: vec![sample_chunk("src/main.rs", body)],
             }],
         };
-        let (repo_id, progress) = store.sync_scan(&repo, &scan).unwrap();
+        let (repo_id, progress) = store.sync_scan(&repo, &scan, true).unwrap();
         let chunk_id = progress.files[0].chunks[0].id.unwrap();
         assert_eq!(
             progress.files[0].chunks[0].completion,
@@ -759,7 +767,7 @@ mod tests {
         };
         // Wait — hash of body2 normalized lines differ. Use same normalized hash explicitly.
         let _ = body2;
-        let (_, progress2) = store.sync_scan(&repo, &scan2).unwrap();
+        let (_, progress2) = store.sync_scan(&repo, &scan2, true).unwrap();
         assert_eq!(
             progress2.files[0].chunks[0].completion,
             ChunkCompletion::Complete
@@ -810,9 +818,9 @@ mod tests {
             root: "/tmp/newer".into(),
             input: "/tmp/newer".into(),
         };
-        let (older_id, _) = store.sync_scan(&older, &scan).unwrap();
+        let (older_id, _) = store.sync_scan(&older, &scan, true).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let (_newer_id, _) = store.sync_scan(&newer, &scan).unwrap();
+        let (_newer_id, _) = store.sync_scan(&newer, &scan, true).unwrap();
         // Touch older so it becomes most recent.
         store.touch_repository(older_id).unwrap();
 
@@ -843,7 +851,7 @@ mod tests {
                 chunks: vec![sample_chunk("src/main.rs", body)],
             }],
         };
-        let (_, progress) = store.sync_scan(&repo, &scan).unwrap();
+        let (_, progress) = store.sync_scan(&repo, &scan, true).unwrap();
         let chunk_id = progress.files[0].chunks[0].id.unwrap();
         let today = Utc::now().to_rfc3339();
         store

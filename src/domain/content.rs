@@ -30,6 +30,8 @@ pub enum SkipReason {
     Binary,
     LineTooLong { max_cols: usize },
     FileTooLarge { max_lines: usize },
+    TestFile,
+    ConfigFile,
     NoChunks,
     IoError(String),
 }
@@ -42,6 +44,8 @@ impl SkipReason {
             Self::Binary => "binary file".into(),
             Self::LineTooLong { max_cols } => format!("line longer than {max_cols} cols"),
             Self::FileTooLarge { max_lines } => format!("more than {max_lines} lines"),
+            Self::TestFile => "test file (include_tests=false)".into(),
+            Self::ConfigFile => "config file (include_configs=false)".into(),
             Self::NoChunks => "no typeable content".into(),
             Self::IoError(msg) => format!("read error: {msg}"),
         }

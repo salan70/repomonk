@@ -111,7 +111,7 @@ fn interrupt_session_does_not_mark_complete() {
         root: fixture_root(),
         input: fixture_root().to_string_lossy().into(),
     };
-    let (repo_id, progress) = store.sync_scan(&repo, &scan).unwrap();
+    let (repo_id, progress) = store.sync_scan(&repo, &scan, true).unwrap();
     let chunk_id = progress
         .files
         .iter()

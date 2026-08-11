@@ -1,4 +1,4 @@
-//! Application state machine: Home / Search / Stats / Splash → Tree → Typing → Result.
+//! Application state machine: Home / Search / Stats / Settings / Splash → Tree → Typing → Result.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -6,10 +6,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::config::{save as save_user_config, UserConfig};
 use crate::domain::content::{
     ChunkCompletion, FileStatus, RepoProgress, ResolvedRepository, SessionSummary, TypingMetrics,
 };
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
+use crate::scan::extract::ExtractOptions;
 use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
 use crate::store::SqliteStore;
@@ -17,6 +19,7 @@ use crate::ui::fx::FxState;
 use crate::ui::home::{draw_home, draw_search_modal, HomeView};
 use crate::ui::result::{draw_result, ResultView};
 use crate::ui::search::SearchState;
+use crate::ui::settings::{draw_settings, SettingKind, SettingsView};
 use crate::ui::splash::{draw_splash, SPLASH_TOTAL_MS};
 use crate::ui::stats::{draw_stats, StatsView};
 use crate::ui::terminal::TerminalGuard;
@@ -29,6 +32,7 @@ enum Screen {
     Home,
     Search,
     Stats,
+    Settings,
     Splash,
     Tree,
     Typing,
@@ -40,8 +44,16 @@ pub struct AppConfig {
     pub cache_dir: PathBuf,
     pub db_path: PathBuf,
     pub refresh: bool,
-    /// Enable visual effects (splash animation, glow, trails).
-    pub fx_enabled: bool,
+    /// CLI `--no-fx` session override.
+    pub no_fx: bool,
+    pub user: UserConfig,
+    pub config_path: PathBuf,
+}
+
+impl AppConfig {
+    pub fn fx_enabled(&self) -> bool {
+        !self.no_fx && self.user.fx_active()
+    }
 }
 
 /// Active repository session (present whenever Tree / Typing / Result / Splash is shown).
@@ -66,6 +78,7 @@ pub struct App {
     home: HomeView,
     search: SearchState,
     stats: Option<StatsView>,
+    settings: SettingsView,
     session: Option<RepoSession>,
     fx: FxState,
     splash_started: Option<Instant>,
@@ -84,8 +97,9 @@ impl App {
             home,
             search: SearchState::default(),
             stats: None,
+            settings: SettingsView::new(),
             session: Some(session),
-            fx: FxState::new(),
+            fx: FxState::with_intensity(cfg.user.fx.intensity),
             splash_started: None,
         })
     }
@@ -101,8 +115,9 @@ impl App {
             home,
             search: SearchState::default(),
             stats: None,
+            settings: SettingsView::new(),
             session: None,
-            fx: FxState::new(),
+            fx: FxState::with_intensity(cfg.user.fx.intensity),
             splash_started: None,
         })
     }
@@ -121,7 +136,7 @@ impl App {
         let tick_rate = Duration::from_millis(16);
 
         // Arg-launch path: optional splash before Tree.
-        if self.session.is_some() && self.screen == Screen::Tree && self.cfg.fx_enabled {
+        if self.session.is_some() && self.screen == Screen::Tree && self.cfg.fx_enabled() {
             self.screen = Screen::Splash;
             self.splash_started = Some(Instant::now());
         }
@@ -139,7 +154,7 @@ impl App {
             } else {
                 None
             };
-            if self.cfg.fx_enabled {
+            if self.cfg.fx_enabled() {
                 if let Some(snap) = &typing_snap {
                     self.fx.observe(snap, now_ms);
                 }
@@ -149,7 +164,7 @@ impl App {
                 .map(|t| t.elapsed().as_millis() as u64)
                 .unwrap_or(0);
             // Home logo uses the same timeline; `--no-fx` shows the fully revealed logo.
-            let home_logo_elapsed = if self.cfg.fx_enabled {
+            let home_logo_elapsed = if self.cfg.fx_enabled() {
                 splash_elapsed
             } else {
                 SPLASH_TOTAL_MS
@@ -168,6 +183,9 @@ impl App {
                             if let Some(stats) = &self.stats {
                                 draw_stats(frame, area, stats);
                             }
+                        }
+                        Screen::Settings => {
+                            draw_settings(frame, area, &self.settings, &self.cfg.user);
                         }
                         Screen::Splash => {
                             if let Some(s) = &self.session {
@@ -188,7 +206,8 @@ impl App {
                                     &s.typing_chunk_label,
                                     snap,
                                     now_ms,
-                                    self.cfg.fx_enabled.then_some(&self.fx),
+                                    self.cfg.fx_enabled().then_some(&self.fx),
+                                    self.cfg.user.typing.show_live_speed,
                                 );
                             }
                         }
@@ -257,6 +276,7 @@ impl App {
             Screen::Home => self.handle_home_key(key),
             Screen::Search => self.handle_search_key(key),
             Screen::Stats => self.handle_stats_key(key),
+            Screen::Settings => self.handle_settings_key(key),
             Screen::Splash => {
                 self.screen = Screen::Tree;
                 Ok(false)
@@ -297,6 +317,11 @@ impl App {
                     self.home.recent.clone(),
                 ));
                 self.screen = Screen::Stats;
+                Ok(false)
+            }
+            KeyCode::Char('c') => {
+                self.settings = SettingsView::new();
+                self.screen = Screen::Settings;
                 Ok(false)
             }
             _ => Ok(false),
@@ -364,6 +389,72 @@ impl App {
             }
             _ => Ok(false),
         }
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        match key.code {
+            KeyCode::Char('q') => Ok(true),
+            KeyCode::Esc => {
+                self.screen = Screen::Home;
+                self.splash_started = Some(Instant::now());
+                Ok(false)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.settings.move_by(1);
+                Ok(false)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.settings.move_by(-1);
+                Ok(false)
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if self.settings.activate(&mut self.cfg.user, true) {
+                    self.persist_user_config()?;
+                }
+                Ok(false)
+            }
+            KeyCode::Char('l') | KeyCode::Right | KeyCode::Char('+') => {
+                let kind = self.settings.selected_kind();
+                if matches!(
+                    kind,
+                    SettingKind::TabWidth
+                        | SettingKind::FxIntensity
+                        | SettingKind::ProgressMode
+                        | SettingKind::DependencyDirection
+                        | SettingKind::Bool
+                ) && self.settings.activate(&mut self.cfg.user, true)
+                {
+                    self.persist_user_config()?;
+                }
+                Ok(false)
+            }
+            KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('-') => {
+                let kind = self.settings.selected_kind();
+                if matches!(
+                    kind,
+                    SettingKind::TabWidth
+                        | SettingKind::FxIntensity
+                        | SettingKind::ProgressMode
+                        | SettingKind::DependencyDirection
+                ) {
+                    if self.settings.activate(&mut self.cfg.user, false) {
+                        self.persist_user_config()?;
+                    }
+                } else if kind == SettingKind::Bool
+                    && self.settings.activate(&mut self.cfg.user, false)
+                {
+                    self.persist_user_config()?;
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn persist_user_config(&mut self) -> crate::Result<()> {
+        save_user_config(&self.cfg.config_path, &self.cfg.user)?;
+        self.fx.set_intensity(self.cfg.user.fx.intensity);
+        Ok(())
     }
 
     fn handle_tree_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
@@ -509,6 +600,11 @@ impl App {
     }
 
     fn start_file(&mut self, path: &str, idx: usize) -> crate::Result<()> {
+        let allow_backspace = self.cfg.user.typing.allow_backspace;
+        let auto_indent = self.cfg.user.typing.auto_indent;
+        let tab_width = self.cfg.user.content.tab_width;
+        let fx_intensity = self.cfg.user.fx.intensity;
+
         let Some(session) = &mut self.session else {
             return Err(Error::Message("no repository open".into()));
         };
@@ -529,8 +625,14 @@ impl App {
         let label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
 
         let started_ms = now_millis();
-        session.engine = Some(TypingEngine::new(&normalized, started_ms, true, 4));
-        self.fx = FxState::new();
+        session.engine = Some(TypingEngine::new(
+            &normalized,
+            started_ms,
+            allow_backspace,
+            auto_indent,
+            tab_width,
+        ));
+        self.fx = FxState::with_intensity(fx_intensity);
         session.typing_path = path.to_string();
         session.typing_chunk_label = label;
         session.typing_chunk_id = chunk_id;
@@ -622,20 +724,25 @@ fn load_session(
     store: &mut SqliteStore,
 ) -> crate::Result<RepoSession> {
     let resolved = resolve_source(input, &cfg.cache_dir, cfg.refresh)?;
+    let walk = walk_options(&cfg.user);
 
     let (progress_repo, scan, single_file) = if resolved.root.is_dir() {
         if resolved.identity.starts_with("local:") {
             let local_path = resolved.identity.trim_start_matches("local:");
             let p = PathBuf::from(local_path);
             if p.is_file() {
-                let (parent, scan) = single_file_scan(&p, WalkOptions::default())?;
+                let (parent, scan) = single_file_scan(&p, walk)?;
                 let name = p
                     .file_name()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let mut resolved_root = resolved.clone();
                 resolved_root.root = parent;
-                let (repo_id, progress) = store.sync_scan(&resolved_root, &scan)?;
+                let (repo_id, progress) = store.sync_scan(
+                    &resolved_root,
+                    &scan,
+                    cfg.user.progress.keep_done_on_refresh,
+                )?;
                 if !progress
                     .files
                     .iter()
@@ -648,10 +755,11 @@ fn load_session(
                     repo_id,
                     progress,
                     Some(name),
+                    cfg.user.progress.hide_skipped,
                 ));
             }
         }
-        let scan = scan_repository(&resolved.root, WalkOptions::default())?;
+        let scan = scan_repository(&resolved.root, walk)?;
         (resolved, scan, None)
     } else {
         return Err(Error::InvalidPath(resolved.root));
@@ -660,13 +768,30 @@ fn load_session(
     if !scan.has_typeable_content() {
         return Err(Error::NoChunks);
     }
-    let (repo_id, progress) = store.sync_scan(&progress_repo, &scan)?;
+    let (repo_id, progress) = store.sync_scan(
+        &progress_repo,
+        &scan,
+        cfg.user.progress.keep_done_on_refresh,
+    )?;
     Ok(RepoSession::from_parts(
         progress_repo,
         repo_id,
         progress,
         single_file,
+        cfg.user.progress.hide_skipped,
     ))
+}
+
+fn walk_options(user: &UserConfig) -> WalkOptions {
+    WalkOptions {
+        max_line_cols: 200,
+        max_file_lines: 5_000,
+        include_tests: user.content.include_tests,
+        include_configs: user.content.include_configs,
+        extract: ExtractOptions {
+            tab_width: user.content.tab_width.max(1),
+        },
+    }
 }
 
 impl RepoSession {
@@ -675,8 +800,9 @@ impl RepoSession {
         repo_id: i64,
         progress: RepoProgress,
         single_file: Option<String>,
+        hide_skipped: bool,
     ) -> Self {
-        let tree = TreeView::from_progress(&repo.display_name, &progress);
+        let tree = TreeView::from_progress(&repo.display_name, &progress, hide_skipped);
         Self {
             repo,
             repo_id,
@@ -711,7 +837,9 @@ pub mod headless {
                 cache_dir: cache.to_path_buf(),
                 db_path: db.to_path_buf(),
                 refresh: false,
-                fx_enabled: false,
+                no_fx: true,
+                user: UserConfig::default(),
+                config_path: cache.join("test-config.toml"),
             },
         )
     }
@@ -779,7 +907,9 @@ mod tests {
             cache_dir: dir.path().join("cache"),
             db_path: dir.path().join("db.sqlite"),
             refresh: false,
-            fx_enabled: false,
+            no_fx: true,
+            user: UserConfig::default(),
+            config_path: dir.path().join("config.toml"),
         };
         let app = App::home(&cfg).unwrap();
         assert_eq!(app.screen, Screen::Home);

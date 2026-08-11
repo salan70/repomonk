@@ -230,8 +230,8 @@ MVPの永続化要件を最小表で満たし、後からALTERで拡張できる
   `TypingEngine`には手を入れない。演出はコア機能の正しさに影響しない。
 - Home画面は実装せず、起動直後にASCIIロゴのスプラッシュ（キー押下または約2秒で
   Treeへ遷移）を表示する。（→ D-014で撤回。Splashは引数あり起動時のみ）
-- 無効化手段は当面CLIフラグ`--no-fx`とする。`config.toml`の`[fx]`セクション対応は
-  未決のまま残す。
+- 無効化手段はCLIフラグ`--no-fx`に加え、`config.toml`の`[fx]`（D-015）でも制御する。
+  `--no-fx`はセッション上書きとして`fx.enabled`より優先する。
 
 ### 理由
 
@@ -249,7 +249,7 @@ MVPの利用ループが完成し、写経体験の質を高える視覚要素�
 - `repomonk`（引数なし）はHomeを最初に表示する。自動でTreeへ進まない。
 - `repomonk <URL|path>` は仕様どおりHomeを省略し、従来どおりSplash（任意）→ Tree。
 - HomeはASCIIロゴ、Recent（完了率バー）、Summary（完了ファイル/チャンク、連続日数）、
-  キー `j`/`k`/`Enter`/`s`/`g`/`q` を持つ。
+  キー `j`/`k`/`Enter`/`s`/`g`/`c`/`q` を持つ（`c`はD-015のSettings）。
 - Search（`s`）は外部APIを使わない。`https://github.com/owner/repo` と
   `owner/repo`、およびローカルRecent・キャッシュ名のあいまい一致のみ。
 - `g` は達成サマリ画面のみ（草・速度ヒートマップは対象外）。
@@ -261,6 +261,28 @@ MVPの利用ループが完成し、写経体験の質を高える視覚要素�
 タイトル／ホームとしての役割（リポジトリ選択と起動の入口）が欠けると、起動直後に
 Treeへ飛ばされて仕様の画面役割とずれるためです。
 
+## D-015: config.toml と TUI Settings
+
+- 状態: 採用
+- 日付: 2026-08-12
+
+### 決定
+
+- ユーザー設定は`~/.config/repomonk/config.toml`に永続化する（プロダクト要件§11）。
+- Homeの`c`で全画面Settingsを開き、変更は都度保存する。EscでHomeへ戻る。
+- 現行ロジックへ結線するキー: `include_tests` / `include_configs` / `tab_width` /
+  `auto_indent` / `allow_backspace` / `show_live_speed` / `keep_done_on_refresh` /
+  `hide_skipped` / `fx.enabled` / `fx.intensity`。
+- tree-sitter依存の行ラベル系（`include_imports`等）、`mode`/`dependency_direction`、
+  `auto_close_brackets`は保存可能だがUI上「unsupported」またはlockedとし、挙動は未実装。
+- 不正な設定値は起動時に修正方法付きエラーで失敗する。欠落ファイルはデフォルトで動作する。
+- 設定変更の反映は次回リポジトリオープン／次回写経開始から（開いているセッションの再走査はしない）。
+- `--no-fx`は`config.toml`の`[fx]`より優先するセッション上書き。
+
+### 理由
+
+仕様書§8とプロダクト要件§11の設定面を、TUIから変更できる体験として提供するためです。
+
 ## 未決定
 
 実装前または実装中に、次を決定してこの文書へ追加します。
@@ -270,4 +292,3 @@ Treeへ飛ばされて仕様の画面役割とずれるためです。
 - 言語別依存解決で許容する取りこぼし
 - ブランチやコミットをまたぐリポジトリ同一性の詳細
 - キャッシュ上限と退避・削除方針
-- `config.toml`の`[fx]`セクション
