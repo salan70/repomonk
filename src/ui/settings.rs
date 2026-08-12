@@ -453,6 +453,7 @@ mod tests {
             FxPreset::Blaze,
             FxPreset::Smear,
             FxPreset::Ripple,
+            FxPreset::Fireworks,
             FxPreset::Classic,
         ] {
             assert!(view.activate(&mut cfg, true));

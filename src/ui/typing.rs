@@ -198,16 +198,32 @@ fn render_body(
             } else {
                 None
             };
+            let fireworks_effects = if preset == FxPreset::Fireworks {
+                (
+                    fx.and_then(|state| state.sparks_at(li, col, now_ms))
+                        .unwrap_or(0.0),
+                    fx.and_then(|state| state.slash_at(li, col, now_ms))
+                        .unwrap_or(0.0),
+                    fx.and_then(|state| state.lightning_at(li, col, now_ms))
+                        .unwrap_or(0.0),
+                    fx.and_then(|state| state.gravity_at(li, col, now_ms))
+                        .unwrap_or(0.0),
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0)
+            };
             let trail_color = match preset {
                 FxPreset::Blaze => theme::ORANGE,
                 FxPreset::Smear => theme::CYAN,
                 FxPreset::Classic => theme::YELLOW,
                 FxPreset::Ripple => theme::BLUE,
+                FxPreset::Fireworks => theme::MAGENTA,
             };
             let bloom_color = match preset {
                 FxPreset::Blaze => theme::ORANGE,
                 FxPreset::Smear => theme::CYAN,
                 FxPreset::Classic | FxPreset::Ripple => theme::BRIGHT,
+                FxPreset::Fireworks => theme::BRIGHT,
             };
 
             let mut style = if idx < snap.cursor {
@@ -220,15 +236,17 @@ fn render_body(
                         FxPreset::Blaze => theme::ORANGE,
                         FxPreset::Smear => theme::CYAN,
                         FxPreset::Classic | FxPreset::Ripple => theme::BRIGHT,
+                        FxPreset::Fireworks => theme::BRIGHT,
                     };
                     let strength = match preset {
                         FxPreset::Blaze => (glow * 1.25 + tier as f32 * 0.05).clamp(0.0, 1.0),
+                        FxPreset::Fireworks => (glow * 1.15 + tier as f32 * 0.05).clamp(0.0, 1.0),
                         _ => glow,
                     };
                     fg = theme::lerp(fg, target, strength);
                 }
                 let mut style = Style::default().fg(fg);
-                if preset == FxPreset::Blaze
+                if matches!(preset, FxPreset::Blaze | FxPreset::Fireworks)
                     && fx
                         .and_then(|state| state.glow_intensity(idx, now_ms))
                         .is_some_and(|glow| glow > 0.35)
@@ -266,6 +284,29 @@ fn render_body(
                 }
                 Style::default().fg(fg)
             };
+
+            if preset == FxPreset::Fireworks && !flash {
+                let (sparks, slash, lightning, gravity) = fireworks_effects;
+                let burst =
+                    (sparks * 0.95 + slash * 0.9 + lightning * 0.9 + gravity * 0.7).clamp(0.0, 1.0);
+                if burst > 0.0 {
+                    let color = if lightning >= sparks.max(slash) {
+                        theme::MAGENTA
+                    } else {
+                        theme::CYAN
+                    };
+                    if idx == snap.cursor {
+                        let base = style.bg.unwrap_or(theme::BG);
+                        style = style.bg(theme::lerp(base, color, burst * 0.85));
+                    } else {
+                        let base = style.fg.unwrap_or(theme::MUTED);
+                        style = style.fg(theme::lerp(base, color, burst));
+                    }
+                    if burst > 0.65 {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                }
+            }
 
             if let Some(ripple) = ripple {
                 let base = style.fg.unwrap_or(theme::MUTED);

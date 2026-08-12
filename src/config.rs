@@ -90,6 +90,7 @@ pub enum FxPreset {
     Smear,
     #[serde(alias = "pulse")]
     Ripple,
+    Fireworks,
 }
 
 impl Default for UserConfig {
@@ -203,6 +204,7 @@ impl FxPreset {
             Self::Blaze => "blaze",
             Self::Smear => "smear",
             Self::Ripple => "ripple",
+            Self::Fireworks => "fireworks",
         }
     }
 
@@ -211,16 +213,18 @@ impl FxPreset {
             Self::Classic => Self::Blaze,
             Self::Blaze => Self::Smear,
             Self::Smear => Self::Ripple,
-            Self::Ripple => Self::Classic,
+            Self::Ripple => Self::Fireworks,
+            Self::Fireworks => Self::Classic,
         }
     }
 
     pub fn cycle_prev(self) -> Self {
         match self {
-            Self::Classic => Self::Ripple,
+            Self::Classic => Self::Fireworks,
             Self::Blaze => Self::Classic,
             Self::Smear => Self::Blaze,
             Self::Ripple => Self::Smear,
+            Self::Fireworks => Self::Ripple,
         }
     }
 }
@@ -262,7 +266,7 @@ fn parse_toml(text: &str, path: &Path) -> crate::Result<UserConfig> {
             "invalid config at {}:\n  {e}\nFix: correct the value to match docs/product-requirements.md §11 \
              (booleans true/false, tab_width 1–8, mode \"manual\"|\"dependency\", \
              dependency_direction \"top_down\"|\"bottom_up\", intensity \"off\"|\"subtle\"|\"normal\"|\"high\", \
-             preset \"classic\"|\"blaze\"|\"smear\"|\"ripple\")",
+             preset \"classic\"|\"blaze\"|\"smear\"|\"ripple\"|\"fireworks\")",
             path.display()
         ))
     })?;
@@ -326,14 +330,29 @@ mod tests {
         cfg.typing.syntax_highlight = false;
         cfg.typing.show_live_speed = true;
         cfg.fx.intensity = FxIntensity::Subtle;
-        cfg.fx.preset = FxPreset::Blaze;
+        cfg.fx.preset = FxPreset::Fireworks;
         save(&path, &cfg).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.content.tab_width, 2);
         assert!(!loaded.typing.syntax_highlight);
         assert!(loaded.typing.show_live_speed);
         assert_eq!(loaded.fx.intensity, FxIntensity::Subtle);
-        assert_eq!(loaded.fx.preset, FxPreset::Blaze);
+        assert_eq!(loaded.fx.preset, FxPreset::Fireworks);
+    }
+
+    #[test]
+    fn presets_cycle_through_fireworks() {
+        let mut preset = FxPreset::Classic;
+        for expected in [
+            FxPreset::Blaze,
+            FxPreset::Smear,
+            FxPreset::Ripple,
+            FxPreset::Fireworks,
+            FxPreset::Classic,
+        ] {
+            preset = preset.cycle_next();
+            assert_eq!(preset, expected);
+        }
     }
 
     #[test]
