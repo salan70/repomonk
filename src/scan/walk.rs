@@ -109,7 +109,27 @@ const CONFIG_NAMES: &[&str] = &[
 ];
 
 const CONFIG_EXTENSIONS: &[&str] = &[
-    ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".config", ".jsonc", ".env",
+    // Configuration, documentation, and data-description formats.
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".config",
+    ".jsonc",
+    ".env",
+    ".md",
+    ".markdown",
+    ".mdx",
+    ".rst",
+    ".txt",
+    ".adoc",
+    ".asciidoc",
+    ".json",
+    ".xml",
+    ".csv",
+    ".tsv",
 ];
 
 /// Scan `root` recursively without following symlinks.
@@ -390,7 +410,7 @@ mod tests {
     fn skips_long_lines() {
         let dir = tempdir().unwrap();
         let long = "a".repeat(201);
-        fs::write(dir.path().join("long.txt"), format!("{long}\n")).unwrap();
+        fs::write(dir.path().join("long.rs"), format!("{long}\n")).unwrap();
         let result = scan_repository(dir.path(), WalkOptions::default()).unwrap();
         assert_eq!(result.files[0].status, FileStatus::Skipped);
         assert!(matches!(
@@ -479,29 +499,47 @@ mod tests {
             "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
+        fs::write(root.join("README.md"), "documentation\n").unwrap();
+        fs::write(root.join("data.yaml"), "name: value\n").unwrap();
+        fs::write(root.join("data.json"), "{\"name\":\"value\"}\n").unwrap();
+        fs::write(root.join("page.html"), "<p>page</p>\n").unwrap();
+        fs::write(root.join("style.css"), "body { color: red; }\n").unwrap();
 
         let skipped = scan_repository(root, WalkOptions::default()).unwrap();
-        let cargo = skipped
-            .files
-            .iter()
-            .find(|f| f.relative_path == "Cargo.toml")
-            .unwrap();
-        assert_eq!(cargo.status, FileStatus::Skipped);
-        assert_eq!(cargo.skip_reason, Some(SkipReason::ConfigFile));
+        for path in ["Cargo.toml", "README.md", "data.yaml", "data.json"] {
+            let file = skipped
+                .files
+                .iter()
+                .find(|f| f.relative_path == path)
+                .unwrap();
+            assert_eq!(file.status, FileStatus::Skipped, "{path}");
+            assert_eq!(file.skip_reason, Some(SkipReason::ConfigFile), "{path}");
+        }
+        for path in ["page.html", "style.css"] {
+            let file = skipped
+                .files
+                .iter()
+                .find(|f| f.relative_path == path)
+                .unwrap();
+            assert_eq!(file.status, FileStatus::Todo, "{path}");
+        }
 
         let opts = WalkOptions {
             include_configs: true,
             ..WalkOptions::default()
         };
         let included = scan_repository(root, opts).unwrap();
-        assert_eq!(
-            included
-                .files
-                .iter()
-                .find(|f| f.relative_path == "Cargo.toml")
-                .unwrap()
-                .status,
-            FileStatus::Todo
-        );
+        for path in ["Cargo.toml", "README.md", "data.yaml", "data.json"] {
+            assert_eq!(
+                included
+                    .files
+                    .iter()
+                    .find(|f| f.relative_path == path)
+                    .unwrap()
+                    .status,
+                FileStatus::Todo,
+                "{path}"
+            );
+        }
     }
 }

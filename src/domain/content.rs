@@ -45,7 +45,7 @@ impl SkipReason {
             Self::LineTooLong { max_cols } => format!("line longer than {max_cols} cols"),
             Self::FileTooLarge { max_lines } => format!("more than {max_lines} lines"),
             Self::TestFile => "test file (include_tests=false)".into(),
-            Self::ConfigFile => "config file (include_configs=false)".into(),
+            Self::ConfigFile => "config or docs (include_configs=false)".into(),
             Self::NoChunks => "no typeable content".into(),
             Self::IoError(msg) => format!("read error: {msg}"),
         }

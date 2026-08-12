@@ -579,7 +579,9 @@ fn parse_skip_reason(raw: &str) -> SkipReason {
         SkipReason::Binary
     } else if raw == "test file (include_tests=false)" {
         SkipReason::TestFile
-    } else if raw == "config file (include_configs=false)" {
+    } else if raw == "config file (include_configs=false)"
+        || raw == "config or docs (include_configs=false)"
+    {
         SkipReason::ConfigFile
     } else if raw == "no typeable chunks" || raw == "no typeable content" {
         SkipReason::NoChunks
@@ -697,7 +699,7 @@ fn purge_dir_contents(root: &Path, dir: &Path) -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::content::{Chunk, ScannedFile, SourceKind};
+    use crate::domain::content::{Chunk, ScannedFile, SkipReason, SourceKind};
     use crate::scan::extract::hash_normalized;
     use tempfile::tempdir;
 
@@ -884,5 +886,17 @@ mod tests {
         dates.insert(NaiveDate::from_ymd_opt(2026, 8, 9).unwrap());
         assert_eq!(compute_streak(&dates, today), 2);
         assert_eq!(compute_streak(&BTreeSet::new(), today), 0);
+    }
+
+    #[test]
+    fn parses_current_and_legacy_config_skip_reasons() {
+        assert_eq!(
+            parse_skip_reason("config or docs (include_configs=false)"),
+            SkipReason::ConfigFile
+        );
+        assert_eq!(
+            parse_skip_reason("config file (include_configs=false)"),
+            SkipReason::ConfigFile
+        );
     }
 }
