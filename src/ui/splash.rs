@@ -64,6 +64,18 @@ pub fn splash_frame(elapsed_ms: u64) -> SplashFrame {
     }
 }
 
+/// Project Home's elapsed time onto a repeating glow sweep.
+///
+/// The initial reveal is kept intact, then the glow restarts after each sweep
+/// so the title logo remains animated while Home is open.
+pub fn looping_logo_elapsed(elapsed_ms: u64) -> u64 {
+    if elapsed_ms < GLOW_START_MS {
+        elapsed_ms
+    } else {
+        GLOW_START_MS + (elapsed_ms - GLOW_START_MS) % GLOW_DURATION_MS
+    }
+}
+
 /// Maximum logo width in characters (all rows share the same width).
 pub fn logo_width() -> usize {
     LOGO.iter().map(|l| l.chars().count()).max().unwrap_or(0)
@@ -182,6 +194,20 @@ mod tests {
         assert_eq!(
             splash_frame(GLOW_START_MS + GLOW_DURATION_MS).glow_phase,
             1.0
+        );
+    }
+
+    #[test]
+    fn home_logo_repeats_glow_after_initial_reveal() {
+        assert_eq!(looping_logo_elapsed(GLOW_START_MS - 1), GLOW_START_MS - 1);
+        assert_eq!(looping_logo_elapsed(GLOW_START_MS), GLOW_START_MS);
+        assert_eq!(
+            looping_logo_elapsed(GLOW_START_MS + GLOW_DURATION_MS),
+            GLOW_START_MS
+        );
+        assert_eq!(
+            looping_logo_elapsed(GLOW_START_MS + GLOW_DURATION_MS + 123),
+            GLOW_START_MS + 123
         );
     }
 

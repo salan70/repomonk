@@ -24,7 +24,7 @@ use crate::ui::home::{draw_home, draw_search_modal, HomeView};
 use crate::ui::result::{draw_result, ResultView};
 use crate::ui::search::SearchState;
 use crate::ui::settings::{draw_settings, SettingKind, SettingsView};
-use crate::ui::splash::{draw_splash, SPLASH_TOTAL_MS};
+use crate::ui::splash::{draw_splash, looping_logo_elapsed, SPLASH_TOTAL_MS};
 use crate::ui::stats::{draw_stats, StatsView};
 use crate::ui::terminal::TerminalGuard;
 use crate::ui::tree::{draw_tree, TreeView};
@@ -179,9 +179,10 @@ impl App {
                 .splash_started
                 .map(|t| t.elapsed().as_millis() as u64)
                 .unwrap_or(0);
-            // Home logo uses the same timeline; `--no-fx` shows the fully revealed logo.
+            // Home logo keeps sweeping after the initial reveal; `--no-fx` shows
+            // the fully revealed logo without animation.
             let home_logo_elapsed = if self.cfg.fx_enabled() {
-                splash_elapsed
+                looping_logo_elapsed(splash_elapsed)
             } else {
                 SPLASH_TOTAL_MS
             };
