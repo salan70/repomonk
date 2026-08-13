@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, Paragraph};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::store::{GlobalSummary, RecentRepo};
@@ -13,11 +13,32 @@ use crate::ui::theme;
 pub struct StatsView {
     pub summary: GlobalSummary,
     pub repos: Vec<RecentRepo>,
+    pub selected: usize,
 }
 
 impl StatsView {
+    pub fn move_by(&mut self, delta: isize) {
+        if self.repos.is_empty() {
+            return;
+        }
+        let len = self.repos.len() as isize;
+        self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+    }
+
+    pub fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.repos.len().saturating_sub(1);
+    }
+
     pub fn new(summary: GlobalSummary, repos: Vec<RecentRepo>) -> Self {
-        Self { summary, repos }
+        Self {
+            summary,
+            repos,
+            selected: 0,
+        }
     }
 }
 
@@ -100,10 +121,24 @@ pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
             })
             .collect()
     };
-    frame.render_widget(List::new(items).style(theme::base_style()), panes[1]);
+    let mut state = ListState::default();
+    if !view.repos.is_empty() {
+        state.select(Some(view.selected.min(view.repos.len() - 1)));
+    }
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_style(Style::default().bg(theme::SELECTION_BG))
+            .style(theme::base_style()),
+        panes[1],
+        &mut state,
+    );
 
     frame.render_widget(
-        Paragraph::new(theme::key_hints(&[("Esc", "back"), ("q", "quit")])),
+        Paragraph::new(theme::key_hints(&[
+            ("j/k", "scroll"),
+            ("Esc", "close"),
+            ("?", "help"),
+        ])),
         panes[2],
     );
 }

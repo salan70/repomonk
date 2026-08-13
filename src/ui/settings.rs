@@ -51,6 +51,8 @@ struct SettingDef {
     kind: SettingKind,
     /// Shown muted; value still editable unless Locked.
     unsupported: bool,
+    /// False when the value needs a repository re-open to take effect.
+    live: bool,
 }
 
 const SETTINGS: &[SettingDef] = &[
@@ -60,6 +62,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "include_imports",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::IncludeDocComments,
@@ -67,6 +70,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "include_doc_comments",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::IncludeComments,
@@ -74,6 +78,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "include_comments",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::IncludeTests,
@@ -81,6 +86,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "include_tests",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::IncludeConfigs,
@@ -88,6 +94,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "include_configs",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::TabWidth,
@@ -95,6 +102,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "tab_width",
         kind: SettingKind::TabWidth,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::AutoIndent,
@@ -102,6 +110,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "auto_indent",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::AutoCloseBrackets,
@@ -109,6 +118,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "auto_close_brackets",
         kind: SettingKind::Locked,
         unsupported: true,
+        live: false,
     },
     SettingDef {
         id: SettingId::AllowBackspace,
@@ -116,6 +126,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "allow_backspace",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::ShowLiveSpeed,
@@ -123,6 +134,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "show_live_speed",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: true,
     },
     SettingDef {
         id: SettingId::SyntaxHighlight,
@@ -130,6 +142,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "syntax_highlight",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: true,
     },
     SettingDef {
         id: SettingId::ProgressMode,
@@ -137,6 +150,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "mode",
         kind: SettingKind::ProgressMode,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::DependencyDirection,
@@ -144,6 +158,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "dependency_direction",
         kind: SettingKind::DependencyDirection,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::KeepDoneOnRefresh,
@@ -151,6 +166,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "keep_done_on_refresh",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: false,
     },
     SettingDef {
         id: SettingId::HideSkipped,
@@ -158,6 +174,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "hide_skipped",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: true,
     },
     SettingDef {
         id: SettingId::FxEnabled,
@@ -165,6 +182,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "enabled",
         kind: SettingKind::Bool,
         unsupported: false,
+        live: true,
     },
     SettingDef {
         id: SettingId::FxIntensity,
@@ -172,6 +190,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "intensity",
         kind: SettingKind::FxIntensity,
         unsupported: false,
+        live: true,
     },
     SettingDef {
         id: SettingId::FxPreset,
@@ -179,6 +198,7 @@ const SETTINGS: &[SettingDef] = &[
         label: "preset",
         kind: SettingKind::FxPreset,
         unsupported: false,
+        live: true,
     },
 ];
 
@@ -373,6 +393,8 @@ pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &U
         }
         if def.kind == SettingKind::Locked {
             label.push_str("  [locked]");
+        } else if !def.live {
+            label.push_str("  (next open)");
         }
         items.push(ListItem::new(Line::from(Span::styled(
             label,
@@ -425,11 +447,11 @@ pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &U
 
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("j/k", "move"),
             ("Enter/Space", "toggle"),
+            ("j/k", "move"),
             ("h/l", "adjust"),
-            ("Esc", "back"),
-            ("q", "quit"),
+            ("Esc", "close"),
+            ("?", "help"),
         ])),
         panes[3],
     );

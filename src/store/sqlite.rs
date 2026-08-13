@@ -1,14 +1,14 @@
 //! SQLite persistence for repositories, chunks, and sessions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use chrono::{NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::domain::content::{
-    ChunkCompletion, ChunkProgress, FileProgress, FileStatus, RepoProgress, ResolvedRepository,
-    ScanResult, SessionSummary, SkipReason,
+    ChunkCompletion, ChunkProgress, FileProgress, FileStatus, ManualOverride, RepoProgress,
+    ResolvedRepository, ScanResult, SessionSummary, SkipReason,
 };
 use crate::Error;
 
@@ -121,6 +121,7 @@ impl SqliteStore {
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')",
             [],
         )?;
+        ensure_column(&self.conn, "repo_files", "manual_override", "TEXT")?;
         Ok(())
     }
 
@@ -165,6 +166,7 @@ impl SqliteStore {
             params![repo_id],
         )?;
 
+        let overrides = load_manual_overrides(&tx, repo_id)?;
         let mut files_out = Vec::new();
 
         for scanned in &scan.files {
@@ -269,6 +271,7 @@ impl SqliteStore {
                 relative_path: scanned.relative_path.clone(),
                 status: scanned.status,
                 skip_reason: scanned.skip_reason.clone(),
+                manual_override: overrides.get(&scanned.relative_path).copied(),
                 chunks: chunk_progresses,
             };
             fp.status = fp.derive_status();
@@ -282,15 +285,15 @@ impl SqliteStore {
     pub fn load_progress(&self, repo_id: i64) -> crate::Result<RepoProgress> {
         let mut files = Vec::new();
         let mut file_stmt = self.conn.prepare(
-            "SELECT id, relative_path, skip_reason FROM repo_files WHERE repository_id = ?1 ORDER BY relative_path",
+            "SELECT id, relative_path, skip_reason, manual_override FROM repo_files WHERE repository_id = ?1 ORDER BY relative_path",
         )?;
-        let file_rows: Vec<(i64, String, Option<String>)> = file_stmt
+        let file_rows: Vec<(i64, String, Option<String>, Option<String>)> = file_stmt
             .query_map(params![repo_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        for (file_id, relative_path, skip_reason) in file_rows {
+        for (file_id, relative_path, skip_reason, manual_override) in file_rows {
             let mut chunk_stmt = self.conn.prepare(
                 r#"
                 SELECT c.id, c.content_hash, c.start_line, c.end_line, c.normalized,
@@ -339,6 +342,7 @@ impl SqliteStore {
                 relative_path,
                 status,
                 skip_reason,
+                manual_override: manual_override.as_deref().and_then(ManualOverride::parse),
                 chunks,
             };
             fp.status = fp.derive_status();
@@ -363,6 +367,28 @@ impl SqliteStore {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Persist a manual skip/include override. `None` restores automatic detection.
+    pub fn set_manual_override(
+        &self,
+        repo_id: i64,
+        relative_path: &str,
+        override_value: Option<ManualOverride>,
+    ) -> crate::Result<()> {
+        let value = override_value.map(ManualOverride::as_str);
+        let changed = self.conn.execute(
+            r#"
+            UPDATE repo_files
+            SET manual_override = ?3
+            WHERE repository_id = ?1 AND relative_path = ?2
+            "#,
+            params![repo_id, relative_path, value],
+        )?;
+        if changed == 0 {
+            return Err(Error::Message(format!("file not found: {relative_path}")));
+        }
         Ok(())
     }
 
@@ -443,7 +469,11 @@ impl SqliteStore {
                 FROM repo_files f
                 JOIN chunks c ON c.file_id = f.id AND c.active = 1
                 LEFT JOIN chunk_progress p ON p.chunk_id = c.id
-                WHERE f.skip_reason IS NULL
+                WHERE COALESCE(f.manual_override, '') != 'skip'
+                  AND (
+                    f.manual_override = 'include'
+                    OR (f.manual_override IS NULL AND f.skip_reason IS NULL)
+                  )
                 GROUP BY f.id
                 HAVING COUNT(c.id) > 0
                    AND SUM(CASE WHEN COALESCE(p.completed, 0) = 1 THEN 1 ELSE 0 END) = COUNT(c.id)
@@ -568,6 +598,41 @@ fn save_session(tx: &Transaction<'_>, summary: &SessionSummary) -> crate::Result
         ],
     )?;
     Ok(())
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> crate::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn load_manual_overrides(
+    tx: &Transaction<'_>,
+    repo_id: i64,
+) -> crate::Result<HashMap<String, ManualOverride>> {
+    let mut stmt = tx.prepare(
+        "SELECT relative_path, manual_override FROM repo_files WHERE repository_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![repo_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (path, raw) = row?;
+        if let Some(value) = raw.as_deref().and_then(ManualOverride::parse) {
+            out.insert(path, value);
+        }
+    }
+    Ok(out)
 }
 
 fn parse_skip_reason(raw: &str) -> SkipReason {
@@ -699,7 +764,7 @@ fn purge_dir_contents(root: &Path, dir: &Path) -> crate::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::content::{Chunk, ScannedFile, SkipReason, SourceKind};
+    use crate::domain::content::{Chunk, ManualOverride, ScannedFile, SkipReason, SourceKind};
     use crate::scan::extract::hash_normalized;
     use tempfile::tempdir;
 
@@ -886,6 +951,50 @@ mod tests {
         dates.insert(NaiveDate::from_ymd_opt(2026, 8, 9).unwrap());
         assert_eq!(compute_streak(&dates, today), 2);
         assert_eq!(compute_streak(&BTreeSet::new(), today), 0);
+    }
+
+    #[test]
+    fn manual_override_survives_refresh() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let body = "fn main() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n";
+        let repo = ResolvedRepository {
+            identity: "local:/tmp/demo".into(),
+            display_name: "demo".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/demo".into(),
+            input: "/tmp/demo".into(),
+        };
+        let scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "src/main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("src/main.rs", body)],
+            }],
+            import_edges: Vec::new(),
+        };
+        let (repo_id, progress) = store.sync_scan(&repo, &scan, true).unwrap();
+        assert_eq!(progress.files[0].derive_status(), FileStatus::Todo);
+
+        store
+            .set_manual_override(repo_id, "src/main.rs", Some(ManualOverride::Skip))
+            .unwrap();
+        let loaded = store.load_progress(repo_id).unwrap();
+        assert_eq!(loaded.files[0].derive_status(), FileStatus::Skipped);
+
+        let (_, refreshed) = store.sync_scan(&repo, &scan, true).unwrap();
+        assert_eq!(
+            refreshed.files[0].manual_override,
+            Some(ManualOverride::Skip)
+        );
+        assert_eq!(refreshed.files[0].derive_status(), FileStatus::Skipped);
+
+        store
+            .set_manual_override(repo_id, "src/main.rs", None)
+            .unwrap();
+        let cleared = store.load_progress(repo_id).unwrap();
+        assert_eq!(cleared.files[0].manual_override, None);
+        assert_eq!(cleared.files[0].derive_status(), FileStatus::Todo);
     }
 
     #[test]

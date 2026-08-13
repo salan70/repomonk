@@ -148,10 +148,7 @@ fn status_line(
         spans.push(Span::styled(format!("⚡{}", fx.streak()), style));
     }
     spans.push(sep());
-    spans.push(Span::styled(
-        "Esc interrupt",
-        Style::default().fg(theme::MUTED),
-    ));
+    spans.push(Span::styled("Esc pause", Style::default().fg(theme::MUTED)));
     Line::from(spans)
 }
 

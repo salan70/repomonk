@@ -1,4 +1,4 @@
-//! Application state machine: Home / Search / Stats / Settings / Splash → Tree → Typing → Result.
+//! Application state machine: places (Home / Tree / Typing / Result) plus overlays.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -10,7 +10,8 @@ use ratatui::style::Color;
 use crate::config::{save as save_user_config, UserConfig};
 use crate::config::{DependencyDirection, ProgressMode};
 use crate::domain::content::{
-    ChunkCompletion, FileStatus, RepoProgress, ResolvedRepository, SessionSummary, TypingMetrics,
+    ChunkCompletion, FileStatus, ManualOverride, RepoProgress, ResolvedRepository, SessionSummary,
+    TypingMetrics,
 };
 use crate::domain::dependency::{order_files, uses_dependency_mode};
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
@@ -19,8 +20,10 @@ use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
 use crate::store::SqliteStore;
 use crate::ui::fx::FxState;
+use crate::ui::help::{draw_help, HelpContext};
 use crate::ui::highlight::highlight_chars;
 use crate::ui::home::{draw_home, draw_search_modal, HomeView};
+use crate::ui::pause::draw_pause;
 use crate::ui::result::{draw_result, ResultView};
 use crate::ui::search::SearchState;
 use crate::ui::settings::{draw_settings, SettingKind, SettingsView};
@@ -32,15 +35,19 @@ use crate::ui::typing::draw_typing;
 use crate::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Screen {
+enum Place {
     Home,
-    Search,
-    Stats,
-    Settings,
-    Splash,
     Tree,
     Typing,
     Result,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    Search,
+    Settings,
+    Stats,
+    Pause,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +97,10 @@ struct DependencySettings {
 pub struct App {
     cfg: AppConfig,
     store: SqliteStore,
-    screen: Screen,
+    place: Place,
+    overlay: Option<Overlay>,
+    help: bool,
+    showing_splash: bool,
     home: HomeView,
     search: SearchState,
     stats: Option<StatsView>,
@@ -109,7 +119,10 @@ impl App {
         Ok(Self {
             cfg: cfg.clone(),
             store,
-            screen: Screen::Tree,
+            place: Place::Tree,
+            overlay: None,
+            help: false,
+            showing_splash: false,
             home,
             search: SearchState::default(),
             stats: None,
@@ -127,7 +140,10 @@ impl App {
         Ok(Self {
             cfg: cfg.clone(),
             store,
-            screen: Screen::Home,
+            place: Place::Home,
+            overlay: None,
+            help: false,
+            showing_splash: false,
             home,
             search: SearchState::default(),
             stats: None,
@@ -152,18 +168,23 @@ impl App {
         let tick_rate = Duration::from_millis(16);
 
         // Arg-launch path: optional splash before Tree.
-        if self.session.is_some() && self.screen == Screen::Tree && self.cfg.fx_enabled() {
-            self.screen = Screen::Splash;
+        if self.session.is_some() && self.place == Place::Tree && self.cfg.fx_enabled() {
+            self.showing_splash = true;
             self.splash_started = Some(Instant::now());
         }
         // Home path: always play the logo reveal/glow on the title screen.
-        if matches!(self.screen, Screen::Home | Screen::Search) {
+        if self.place == Place::Home {
             self.splash_started = Some(Instant::now());
         }
 
         loop {
             let now_ms = now_millis();
-            let typing_snap = if self.screen == Screen::Typing {
+            if self.place == Place::Tree {
+                if let Some(s) = &mut self.session {
+                    s.tree.visible_rows = 12;
+                }
+            }
+            let typing_snap = if self.place == Place::Typing {
                 self.session
                     .as_ref()
                     .and_then(|s| s.engine.as_ref().map(|e| e.snapshot()))
@@ -190,51 +211,62 @@ impl App {
                 let term = guard.terminal();
                 term.draw(|frame| {
                     let area = frame.area();
-                    match self.screen {
-                        Screen::Home => draw_home(frame, area, &self.home, home_logo_elapsed),
-                        Screen::Search => {
-                            draw_home(frame, area, &self.home, home_logo_elapsed);
-                            draw_search_modal(frame, area, &self.search);
+                    if self.showing_splash {
+                        if let Some(s) = &self.session {
+                            draw_splash(frame, area, splash_elapsed, &s.repo.display_name);
                         }
-                        Screen::Stats => {
-                            if let Some(stats) = &self.stats {
-                                draw_stats(frame, area, stats);
+                    } else {
+                        match self.place {
+                            Place::Home => {
+                                draw_home(frame, area, &self.home, home_logo_elapsed);
+                            }
+                            Place::Tree => {
+                                if let Some(s) = &self.session {
+                                    draw_tree(frame, area, &s.tree);
+                                }
+                            }
+                            Place::Typing => {
+                                if let (Some(s), Some(snap)) = (&self.session, &typing_snap) {
+                                    let location =
+                                        format!("{} › {}", s.repo.display_name, s.typing_path);
+                                    draw_typing(
+                                        frame,
+                                        area,
+                                        &location,
+                                        &s.typing_chunk_label,
+                                        snap,
+                                        s.typing_syntax_colors.as_deref(),
+                                        now_ms,
+                                        self.cfg.fx_enabled().then_some(&self.fx),
+                                        self.cfg.user.typing.show_live_speed,
+                                    );
+                                }
+                            }
+                            Place::Result => {
+                                if let Some(view) =
+                                    self.session.as_ref().and_then(|s| s.result.as_ref())
+                                {
+                                    draw_result(frame, area, view);
+                                }
                             }
                         }
-                        Screen::Settings => {
-                            draw_settings(frame, area, &self.settings, &self.cfg.user);
-                        }
-                        Screen::Splash => {
-                            if let Some(s) = &self.session {
-                                draw_splash(frame, area, splash_elapsed, &s.repo.display_name);
+                        match self.overlay {
+                            Some(Overlay::Search) => {
+                                draw_search_modal(frame, area, &self.search);
                             }
-                        }
-                        Screen::Tree => {
-                            if let Some(s) = &self.session {
-                                draw_tree(frame, area, &s.tree);
+                            Some(Overlay::Settings) => {
+                                draw_settings(frame, area, &self.settings, &self.cfg.user);
                             }
-                        }
-                        Screen::Typing => {
-                            if let (Some(s), Some(snap)) = (&self.session, &typing_snap) {
-                                draw_typing(
-                                    frame,
-                                    area,
-                                    &s.typing_path,
-                                    &s.typing_chunk_label,
-                                    snap,
-                                    s.typing_syntax_colors.as_deref(),
-                                    now_ms,
-                                    self.cfg.fx_enabled().then_some(&self.fx),
-                                    self.cfg.user.typing.show_live_speed,
-                                );
+                            Some(Overlay::Stats) => {
+                                if let Some(stats) = &self.stats {
+                                    draw_stats(frame, area, stats);
+                                }
                             }
+                            Some(Overlay::Pause) => draw_pause(frame, area),
+                            None => {}
                         }
-                        Screen::Result => {
-                            if let Some(view) =
-                                self.session.as_ref().and_then(|s| s.result.as_ref())
-                            {
-                                draw_result(frame, area, view);
-                            }
+                        if self.help {
+                            draw_help(frame, area, self.help_context());
                         }
                     }
                 })
@@ -255,8 +287,8 @@ impl App {
             }
 
             if last_tick.elapsed() >= tick_rate {
-                if self.screen == Screen::Splash && splash_elapsed >= SPLASH_TOTAL_MS {
-                    self.screen = Screen::Tree;
+                if self.showing_splash && splash_elapsed >= SPLASH_TOTAL_MS {
+                    self.showing_splash = false;
                 }
                 let finished = self.session.as_mut().and_then(|session| {
                     let engine = session.engine.as_mut()?;
@@ -287,27 +319,161 @@ impl App {
     /// Returns true when the app should quit.
     fn handle_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if self.place == Place::Typing {
+                self.interrupt_typing()?;
+            }
             return Ok(true);
         }
 
-        match self.screen {
-            Screen::Home => self.handle_home_key(key),
-            Screen::Search => self.handle_search_key(key),
-            Screen::Stats => self.handle_stats_key(key),
-            Screen::Settings => self.handle_settings_key(key),
-            Screen::Splash => {
-                self.screen = Screen::Tree;
+        if self.showing_splash {
+            self.showing_splash = false;
+            return Ok(false);
+        }
+
+        if self.help {
+            if matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+            ) {
+                self.help = false;
+            }
+            return Ok(false);
+        }
+
+        if self.overlay == Some(Overlay::Pause) {
+            return self.handle_pause_key(key);
+        }
+
+        if self.place == Place::Typing {
+            return self.handle_typing_key(key);
+        }
+
+        if key.code == KeyCode::Char('?') {
+            self.help = true;
+            return Ok(false);
+        }
+
+        match self.overlay {
+            Some(Overlay::Search) => return self.handle_search_key(key),
+            Some(Overlay::Settings) => return self.handle_settings_key(key),
+            Some(Overlay::Stats) => return self.handle_stats_key(key),
+            Some(Overlay::Pause) | None => {}
+        }
+
+        if key.code == KeyCode::Char(',')
+            || (self.place == Place::Home && key.code == KeyCode::Char('c'))
+        {
+            self.open_settings();
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('S') {
+            self.open_stats()?;
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('/') && self.place == Place::Home
+            || (self.place == Place::Home && key.code == KeyCode::Char('s'))
+        {
+            self.open_search();
+            return Ok(false);
+        }
+
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            return self.back_or_quit(key.code == KeyCode::Char('q'));
+        }
+
+        match self.place {
+            Place::Home => self.handle_home_key(key),
+            Place::Tree => self.handle_tree_key(key),
+            Place::Typing => self.handle_typing_key(key),
+            Place::Result => self.handle_result_key(key),
+        }
+    }
+
+    fn help_context(&self) -> HelpContext {
+        if self.help {
+            if let Some(overlay) = self.overlay {
+                return match overlay {
+                    Overlay::Search => HelpContext::Search,
+                    Overlay::Settings => HelpContext::Settings,
+                    Overlay::Stats => HelpContext::Stats,
+                    Overlay::Pause => HelpContext::Pause,
+                };
+            }
+        }
+        match self.place {
+            Place::Home => HelpContext::Home,
+            Place::Tree => HelpContext::Tree,
+            Place::Typing => HelpContext::Typing,
+            Place::Result => HelpContext::Result,
+        }
+    }
+
+    fn open_search(&mut self) {
+        self.search = SearchState::default();
+        self.search.refresh(&self.home.recent, &self.cfg.cache_dir);
+        self.overlay = Some(Overlay::Search);
+    }
+
+    fn open_settings(&mut self) {
+        self.settings = SettingsView::new();
+        self.overlay = Some(Overlay::Settings);
+    }
+
+    fn open_stats(&mut self) -> crate::Result<()> {
+        self.reload_home_data()?;
+        self.stats = Some(StatsView::new(
+            self.home.summary.clone(),
+            self.home.recent.clone(),
+        ));
+        self.overlay = Some(Overlay::Stats);
+        Ok(())
+    }
+
+    fn close_overlay(&mut self) -> crate::Result<()> {
+        if self.overlay == Some(Overlay::Settings) {
+            self.apply_live_settings()?;
+        }
+        self.overlay = None;
+        Ok(())
+    }
+
+    fn apply_live_settings(&mut self) -> crate::Result<()> {
+        self.fx.set_intensity(self.cfg.user.fx.intensity);
+        self.fx.set_preset(self.cfg.user.fx.preset);
+        if let Some(s) = &mut self.session {
+            s.tree.hide_skipped = self.cfg.user.progress.hide_skipped;
+            s.tree.refresh_rows(&s.progress);
+        }
+        Ok(())
+    }
+
+    fn back_or_quit(&mut self, from_q: bool) -> crate::Result<bool> {
+        match self.place {
+            Place::Home => Ok(from_q || false),
+            Place::Tree => {
+                self.return_to_home()?;
                 Ok(false)
             }
-            Screen::Tree => self.handle_tree_key(key),
-            Screen::Typing => self.handle_typing_key(key),
-            Screen::Result => self.handle_result_key(key),
+            Place::Result => {
+                self.return_to_tree();
+                Ok(false)
+            }
+            Place::Typing => Ok(false),
         }
+    }
+
+    fn return_to_tree(&mut self) {
+        if let Some(s) = &mut self.session {
+            s.result = None;
+            s.tree.refresh_rows(&s.progress);
+        }
+        self.place = Place::Tree;
+        self.overlay = None;
+        self.help = false;
     }
 
     fn handle_home_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         match key.code {
-            KeyCode::Char('q') => Ok(true),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.home.move_by(1);
                 Ok(false)
@@ -316,30 +482,18 @@ impl App {
                 self.home.move_by(-1);
                 Ok(false)
             }
+            KeyCode::Char('g') => {
+                self.home.select_first();
+                Ok(false)
+            }
+            KeyCode::Char('G') => {
+                self.home.select_last();
+                Ok(false)
+            }
             KeyCode::Enter => {
                 if let Some(input) = self.home.selected_input().map(str::to_string) {
                     self.open_from_home(&input)?;
                 }
-                Ok(false)
-            }
-            KeyCode::Char('s') => {
-                self.search = SearchState::default();
-                self.search.refresh(&self.home.recent, &self.cfg.cache_dir);
-                self.screen = Screen::Search;
-                Ok(false)
-            }
-            KeyCode::Char('g') => {
-                self.reload_home_data()?;
-                self.stats = Some(StatsView::new(
-                    self.home.summary.clone(),
-                    self.home.recent.clone(),
-                ));
-                self.screen = Screen::Stats;
-                Ok(false)
-            }
-            KeyCode::Char('c') => {
-                self.settings = SettingsView::new();
-                self.screen = Screen::Settings;
                 Ok(false)
             }
             _ => Ok(false),
@@ -349,7 +503,7 @@ impl App {
     fn handle_search_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         match key.code {
             KeyCode::Esc => {
-                self.screen = Screen::Home;
+                self.close_overlay()?;
                 Ok(false)
             }
             KeyCode::Enter => {
@@ -358,11 +512,11 @@ impl App {
                 }
                 Ok(false)
             }
-            KeyCode::Char('j') | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('n') | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.search.move_by(1);
                 Ok(false)
             }
-            KeyCode::Char('k') | KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('p') | KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.search.move_by(-1);
                 Ok(false)
             }
@@ -380,16 +534,8 @@ impl App {
                 Ok(false)
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // j/k navigate when not typing? Spec uses j/k for select in search.
-                // Prefer character insertion; use arrow / Ctrl-j/k for move so typing works.
-                if c == 'j' && self.search.query.is_empty() {
-                    self.search.move_by(1);
-                } else if c == 'k' && self.search.query.is_empty() {
-                    self.search.move_by(-1);
-                } else {
-                    self.search.query.push(c);
-                    self.search.refresh(&self.home.recent, &self.cfg.cache_dir);
-                }
+                self.search.query.push(c);
+                self.search.refresh(&self.home.recent, &self.cfg.cache_dir);
                 Ok(false)
             }
             _ => Ok(false),
@@ -398,11 +544,32 @@ impl App {
 
     fn handle_stats_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         match key.code {
-            KeyCode::Char('q') => Ok(true),
-            KeyCode::Esc => {
-                self.stats = None;
-                self.screen = Screen::Home;
-                self.splash_started = Some(Instant::now());
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('S') => {
+                self.close_overlay()?;
+                Ok(false)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(stats) = &mut self.stats {
+                    stats.move_by(1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(stats) = &mut self.stats {
+                    stats.move_by(-1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('g') => {
+                if let Some(stats) = &mut self.stats {
+                    stats.select_first();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('G') => {
+                if let Some(stats) = &mut self.stats {
+                    stats.select_last();
+                }
                 Ok(false)
             }
             _ => Ok(false),
@@ -411,10 +578,8 @@ impl App {
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         match key.code {
-            KeyCode::Char('q') => Ok(true),
-            KeyCode::Esc => {
-                self.screen = Screen::Home;
-                self.splash_started = Some(Instant::now());
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => {
+                self.close_overlay()?;
                 Ok(false)
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -479,12 +644,11 @@ impl App {
     }
 
     fn handle_tree_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        if self.session.as_ref().is_some_and(|s| s.tree.filter_editing) {
+            return self.handle_tree_filter_key(key);
+        }
+
         match key.code {
-            KeyCode::Char('q') => Ok(true),
-            KeyCode::Esc => {
-                self.return_to_home()?;
-                Ok(false)
-            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(s) = &mut self.session {
                     s.tree.move_by(1);
@@ -497,11 +661,78 @@ impl App {
                 }
                 Ok(false)
             }
-            KeyCode::Char(' ') => {
+            KeyCode::Char('g') => {
+                if let Some(s) = &mut self.session {
+                    s.tree.select_first();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('G') => {
+                if let Some(s) = &mut self.session {
+                    s.tree.select_last();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(s) = &mut self.session {
+                    s.tree.page_by(1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(s) = &mut self.session {
+                    s.tree.page_by(-1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char(' ') | KeyCode::Char('l') | KeyCode::Right => {
                 if let Some(s) = &mut self.session {
                     let progress = s.progress.clone();
-                    s.tree.toggle_collapse(&progress);
+                    s.tree.expand_dir(&progress);
                 }
+                Ok(false)
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if let Some(s) = &mut self.session {
+                    let progress = s.progress.clone();
+                    s.tree.collapse_or_parent(&progress);
+                }
+                Ok(false)
+            }
+            KeyCode::Tab => {
+                if let Some(s) = &mut self.session {
+                    s.tree.jump_recommend();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('n') => {
+                if let Some(s) = &mut self.session {
+                    if !s.tree.filter.is_empty() {
+                        s.tree.next_match(false);
+                    }
+                }
+                Ok(false)
+            }
+            KeyCode::Char('N') => {
+                if let Some(s) = &mut self.session {
+                    if !s.tree.filter.is_empty() {
+                        s.tree.next_match(true);
+                    }
+                }
+                Ok(false)
+            }
+            KeyCode::Char('/') => {
+                if let Some(s) = &mut self.session {
+                    s.tree.begin_filter();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('x') => {
+                self.toggle_tree_skip()?;
+                Ok(false)
+            }
+            KeyCode::Char('X') => {
+                self.clear_tree_skip()?;
                 Ok(false)
             }
             KeyCode::Char('e') => {
@@ -522,6 +753,13 @@ impl App {
                 Ok(false)
             }
             KeyCode::Enter => {
+                if let Some(s) = &mut self.session {
+                    if s.tree.selected_dir_path().is_some() {
+                        let progress = s.progress.clone();
+                        s.tree.toggle_collapse(&progress);
+                        return Ok(false);
+                    }
+                }
                 let path = self
                     .session
                     .as_ref()
@@ -535,9 +773,57 @@ impl App {
         }
     }
 
+    fn handle_tree_filter_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if let Some(s) = &mut self.session {
+                    let progress = s.progress.clone();
+                    s.tree.clear_filter(&progress);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('n') => {
+                if let Some(s) = &mut self.session {
+                    s.tree.next_match(false);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('N') => {
+                if let Some(s) = &mut self.session {
+                    s.tree.next_match(true);
+                }
+                Ok(false)
+            }
+            KeyCode::Backspace => {
+                if let Some(s) = &mut self.session {
+                    let progress = s.progress.clone();
+                    s.tree.pop_filter(&progress);
+                }
+                Ok(false)
+            }
+            KeyCode::Enter => {
+                if let Some(s) = &mut self.session {
+                    s.tree.filter_editing = false;
+                }
+                Ok(false)
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(s) = &mut self.session {
+                    let progress = s.progress.clone();
+                    s.tree.push_filter(c, &progress);
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn handle_typing_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        if key.code == KeyCode::Esc {
+            self.overlay = Some(Overlay::Pause);
+            return Ok(false);
+        }
         let cmd = match key.code {
-            KeyCode::Esc => TypingCommand::Escape,
             KeyCode::Enter => TypingCommand::Enter,
             KeyCode::Backspace => TypingCommand::Backspace,
             KeyCode::Tab => TypingCommand::Char('\t'),
@@ -563,23 +849,168 @@ impl App {
         Ok(false)
     }
 
-    fn handle_result_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+    fn handle_pause_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        if key.code == KeyCode::Char('?') {
+            self.help = true;
+            return Ok(false);
+        }
         match key.code {
-            KeyCode::Char('q') => Ok(true),
-            KeyCode::Enter => {
-                self.return_to_home()?;
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.overlay = None;
                 Ok(false)
             }
-            KeyCode::Esc | KeyCode::Char('r') | KeyCode::Char('t') => {
-                if let Some(s) = &mut self.session {
-                    s.result = None;
-                    s.tree.refresh_rows(&s.progress);
+            KeyCode::Char('r') => {
+                self.overlay = None;
+                let path = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.typing_path.clone())
+                    .unwrap_or_default();
+                if !path.is_empty() {
+                    self.start_file(&path, 0)?;
                 }
-                self.screen = Screen::Tree;
+                Ok(false)
+            }
+            KeyCode::Char('t') => {
+                self.overlay = None;
+                self.interrupt_typing()?;
                 Ok(false)
             }
             _ => Ok(false),
         }
+    }
+
+    fn handle_result_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        match key.code {
+            KeyCode::Enter => {
+                let next = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.tree.recommend.clone())
+                    .or_else(|| {
+                        self.session
+                            .as_ref()
+                            .and_then(|s| s.progress.recommend_path().map(str::to_string))
+                    });
+                if let Some(path) = next {
+                    self.open_file(&path)?;
+                } else {
+                    if let Some(s) = &mut self.session {
+                        s.tree.repo_complete = s.progress.is_repo_complete();
+                    }
+                    self.return_to_tree();
+                }
+                Ok(false)
+            }
+            KeyCode::Char('r') => {
+                let path = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.result.as_ref().map(|r| r.path.clone()));
+                if let Some(path) = path {
+                    self.open_file(&path)?;
+                }
+                Ok(false)
+            }
+            KeyCode::Char('t') => {
+                self.return_to_tree();
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn interrupt_typing(&mut self) -> crate::Result<()> {
+        let finished = self.session.as_mut().and_then(|session| {
+            let engine = session.engine.as_mut()?;
+            engine.apply(TypingCommand::Escape);
+            Some(false)
+        });
+        if finished.is_some() {
+            self.finish_typing(false)?;
+        }
+        Ok(())
+    }
+
+    fn toggle_tree_skip(&mut self) -> crate::Result<()> {
+        let paths = self.selected_override_paths();
+        let updates: Vec<(String, Option<ManualOverride>)> = {
+            let Some(session) = &self.session else {
+                return Ok(());
+            };
+            paths
+                .into_iter()
+                .filter_map(|path| {
+                    session
+                        .progress
+                        .files
+                        .iter()
+                        .find(|f| f.relative_path == path)
+                        .and_then(|f| {
+                            f.toggle_override_target()
+                                .map(|target| (path, Some(target)))
+                        })
+                })
+                .collect()
+        };
+        self.apply_overrides(updates)
+    }
+
+    fn clear_tree_skip(&mut self) -> crate::Result<()> {
+        let updates = self
+            .selected_override_paths()
+            .into_iter()
+            .map(|path| (path, None))
+            .collect();
+        self.apply_overrides(updates)
+    }
+
+    fn selected_override_paths(&self) -> Vec<String> {
+        let Some(session) = &self.session else {
+            return Vec::new();
+        };
+        if let Some(file) = session.tree.selected_file_path() {
+            return vec![file];
+        }
+        if let Some(dir) = session.tree.selected_dir_path() {
+            let prefix = format!("{dir}/");
+            return session
+                .progress
+                .files
+                .iter()
+                .filter(|f| f.relative_path == dir || f.relative_path.starts_with(&prefix))
+                .map(|f| f.relative_path.clone())
+                .collect();
+        }
+        Vec::new()
+    }
+
+    fn apply_overrides(
+        &mut self,
+        updates: Vec<(String, Option<ManualOverride>)>,
+    ) -> crate::Result<()> {
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let repo_id = session.repo_id;
+        for (path, value) in &updates {
+            self.store.set_manual_override(repo_id, path, *value)?;
+            if let Some(file) = session
+                .progress
+                .files
+                .iter_mut()
+                .find(|f| f.relative_path == *path)
+            {
+                file.manual_override = *value;
+                file.status = file.derive_status();
+            }
+        }
+        if session.dependency_mode {
+            session.recompute_dependency_order();
+        } else {
+            session.tree.refresh_rows(&session.progress);
+        }
+        Ok(())
     }
 
     fn open_from_home(&mut self, input: &str) -> crate::Result<()> {
@@ -587,13 +1018,17 @@ impl App {
             Ok(session) => {
                 self.session = Some(session);
                 self.home.error = None;
-                self.screen = Screen::Tree;
+                self.place = Place::Tree;
+                self.overlay = None;
+                self.help = false;
+                self.showing_splash = false;
                 self.splash_started = None;
                 Ok(())
             }
             Err(err) => {
                 self.home.error = Some(err.to_string());
-                self.screen = Screen::Home;
+                self.place = Place::Home;
+                self.overlay = None;
                 Ok(())
             }
         }
@@ -606,8 +1041,10 @@ impl App {
         self.session = None;
         self.stats = None;
         self.search = SearchState::default();
+        self.overlay = None;
+        self.help = false;
         self.reload_home_data()?;
-        self.screen = Screen::Home;
+        self.place = Place::Home;
         self.splash_started = Some(Instant::now());
         Ok(())
     }
@@ -684,7 +1121,9 @@ impl App {
         session.typing_chunk_id = chunk_id;
         session.session_started_at = Utc::now().to_rfc3339();
         session.result = None;
-        self.screen = Screen::Typing;
+        session.tree.repo_complete = false;
+        self.place = Place::Typing;
+        self.overlay = None;
 
         let already_done = session
             .engine
@@ -745,15 +1184,21 @@ impl App {
             .map(|f| f.derive_status() == FileStatus::Done)
             .unwrap_or(false);
 
-        session.result = Some(ResultView {
-            path: typing_path,
-            completed,
-            metrics,
-            file_done,
-        });
-        session.tree.refresh_rows(&session.progress);
         self.store.record_session(&summary)?;
-        self.screen = Screen::Result;
+        session.tree.refresh_rows(&session.progress);
+        if completed {
+            session.result = Some(ResultView {
+                repo: session.repo.display_name.clone(),
+                path: typing_path,
+                completed,
+                metrics,
+                file_done,
+            });
+            self.place = Place::Result;
+        } else {
+            session.result = None;
+            self.place = Place::Tree;
+        }
         Ok(())
     }
 }
@@ -989,6 +1434,45 @@ pub mod headless {
         )
     }
 
+    pub fn place_name(app: &App) -> &'static str {
+        match app.place {
+            Place::Home => "home",
+            Place::Tree => "tree",
+            Place::Typing => "typing",
+            Place::Result => "result",
+        }
+    }
+
+    pub fn overlay_name(app: &App) -> Option<&'static str> {
+        match app.overlay {
+            Some(Overlay::Search) => Some("search"),
+            Some(Overlay::Settings) => Some("settings"),
+            Some(Overlay::Stats) => Some("stats"),
+            Some(Overlay::Pause) => Some("pause"),
+            None => None,
+        }
+    }
+
+    pub fn help_open(app: &App) -> bool {
+        app.help
+    }
+
+    pub fn press(app: &mut App, code: KeyCode) -> crate::Result<bool> {
+        press_with(app, code, KeyModifiers::NONE)
+    }
+
+    pub fn press_char(app: &mut App, c: char) -> crate::Result<bool> {
+        press_with(app, KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    pub fn press_with(
+        app: &mut App,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> crate::Result<bool> {
+        app.handle_key(KeyEvent::new(code, modifiers))
+    }
+
     pub fn complete_recommended(app: &mut App) -> crate::Result<TypingMetrics> {
         let path = app
             .progress()
@@ -1043,6 +1527,7 @@ pub mod headless {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -1057,7 +1542,218 @@ mod tests {
             config_path: dir.path().join("config.toml"),
         };
         let app = App::home(&cfg).unwrap();
-        assert_eq!(app.screen, Screen::Home);
+        assert_eq!(headless::place_name(&app), "home");
         assert!(app.session.is_none());
+    }
+
+    fn test_cfg(dir: &std::path::Path) -> AppConfig {
+        AppConfig {
+            cache_dir: dir.join("cache"),
+            db_path: dir.join("db.sqlite"),
+            refresh: false,
+            no_fx: true,
+            user: UserConfig::default(),
+            config_path: dir.join("config.toml"),
+        }
+    }
+
+    #[test]
+    fn q_from_tree_returns_home_instead_of_quit() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
+        assert!(!headless::press_char(&mut app, 'q').unwrap());
+        assert_eq!(headless::place_name(&app), "home");
+        assert!(headless::press_char(&mut app, 'q').unwrap());
+    }
+
+    #[test]
+    fn settings_overlay_keeps_tree_session() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        headless::press_char(&mut app, ',').unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("settings"));
+        assert_eq!(headless::place_name(&app), "tree");
+        assert!(app.session.is_some());
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::overlay_name(&app), None);
+        assert_eq!(headless::place_name(&app), "tree");
+    }
+
+    #[test]
+    fn search_j_is_always_query_text() {
+        let dir = tempdir().unwrap();
+        let mut app = App::home(&test_cfg(dir.path())).unwrap();
+        headless::press_char(&mut app, '/').unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("search"));
+        headless::press_char(&mut app, 'j').unwrap();
+        headless::press_char(&mut app, 'k').unwrap();
+        assert_eq!(app.search.query, "jk");
+    }
+
+    #[test]
+    fn typing_esc_pauses_and_t_interrupts_without_result() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        let path = app.progress().recommend_path().unwrap().to_string();
+        app.start_file(&path, 0).unwrap();
+        assert_eq!(headless::place_name(&app), "typing");
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("pause"));
+        headless::press_char(&mut app, 't').unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
+        assert_eq!(headless::overlay_name(&app), None);
+        assert!(app.session.as_ref().is_some_and(|s| s.result.is_none()));
+        assert_eq!(
+            app.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == path)
+                .map(crate::domain::content::FileProgress::derive_status),
+            Some(FileStatus::Todo)
+        );
+    }
+
+    #[test]
+    fn result_enter_starts_next_and_r_retries() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        let first = app.progress().recommend_path().unwrap().to_string();
+        headless::complete_recommended(&mut app).unwrap();
+        assert_eq!(headless::place_name(&app), "result");
+        let next = app
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.recommend.clone())
+            .expect("next recommendation");
+        assert_ne!(next, first);
+        headless::press(&mut app, KeyCode::Enter).unwrap();
+        assert_eq!(headless::place_name(&app), "typing");
+        assert_eq!(
+            app.session.as_ref().map(|s| s.typing_path.as_str()),
+            Some(next.as_str())
+        );
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        headless::press_char(&mut app, 't').unwrap();
+        app.start_file(&first, 0).unwrap();
+        // empty file bodies complete immediately
+        if headless::place_name(&app) == "result" {
+            headless::press_char(&mut app, 'r').unwrap();
+            assert_eq!(
+                app.session.as_ref().map(|s| s.typing_path.as_str()),
+                Some(first.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn help_opens_from_tree() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        headless::press_char(&mut app, '?').unwrap();
+        assert!(headless::help_open(&app));
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert!(!headless::help_open(&app));
+    }
+
+    #[test]
+    fn tree_tab_jumps_to_recommend() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        if let Some(s) = &mut app.session {
+            s.tree.select_last();
+        }
+        headless::press(&mut app, KeyCode::Tab).unwrap();
+        let selected = app
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.selected_file_path());
+        let recommend = app.session.as_ref().and_then(|s| s.tree.recommend.clone());
+        assert_eq!(selected, recommend);
+    }
+
+    #[test]
+    fn tree_x_skips_and_x_clears_after_refresh() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let db = dir.path().join("db.sqlite");
+        let cache = dir.path().join("cache");
+        let mut app = headless::open_local(fixture.to_str().unwrap(), &db, &cache).unwrap();
+        let path = app.progress().recommend_path().unwrap().to_string();
+        assert!(
+            app.session
+                .as_mut()
+                .is_some_and(|s| s.tree.jump_to_path(&path)),
+            "first jump to {path}"
+        );
+        headless::press_char(&mut app, 'x').unwrap();
+        assert_eq!(
+            app.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == path)
+                .map(|f| f.derive_status()),
+            Some(FileStatus::Skipped)
+        );
+        let mut app2 = headless::open_local(fixture.to_str().unwrap(), &db, &cache).unwrap();
+        assert_eq!(
+            app2.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == path)
+                .and_then(|f| f.manual_override),
+            Some(ManualOverride::Skip)
+        );
+        assert!(
+            app2.session
+                .as_mut()
+                .is_some_and(|s| s.tree.jump_to_path(&path)),
+            "second jump to {path}"
+        );
+        headless::press_char(&mut app2, 'X').unwrap();
+        assert_eq!(
+            app2.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == path)
+                .map(|f| f.derive_status()),
+            Some(FileStatus::Todo)
+        );
     }
 }

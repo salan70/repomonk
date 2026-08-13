@@ -60,6 +60,30 @@ pub enum FileStatus {
     Skipped,
 }
 
+/// User override that always wins over automatic skip detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualOverride {
+    Skip,
+    Include,
+}
+
+impl ManualOverride {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Include => "include",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "skip" => Some(Self::Skip),
+            "include" => Some(Self::Include),
+            _ => None,
+        }
+    }
+}
+
 /// A normalized chunk extracted from a source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chunk {
@@ -118,6 +142,7 @@ pub struct FileProgress {
     pub relative_path: String,
     pub status: FileStatus,
     pub skip_reason: Option<SkipReason>,
+    pub manual_override: Option<ManualOverride>,
     pub chunks: Vec<ChunkProgress>,
 }
 
@@ -146,9 +171,20 @@ impl FileProgress {
     }
 
     pub fn derive_status(&self) -> FileStatus {
-        if self.status == FileStatus::Skipped || self.skip_reason.is_some() {
-            return FileStatus::Skipped;
+        match self.manual_override {
+            Some(ManualOverride::Skip) => FileStatus::Skipped,
+            Some(ManualOverride::Include) => self.status_from_chunks(),
+            None => {
+                if self.skip_reason.is_some() {
+                    FileStatus::Skipped
+                } else {
+                    self.status_from_chunks()
+                }
+            }
         }
+    }
+
+    fn status_from_chunks(&self) -> FileStatus {
         if self.chunks.is_empty() {
             return FileStatus::Skipped;
         }
@@ -160,6 +196,31 @@ impl FileProgress {
             FileStatus::Done
         } else {
             FileStatus::Todo
+        }
+    }
+
+    /// Skip reason shown in the tree. Manual skip wins over the automatic reason.
+    pub fn display_skip_reason(&self) -> Option<String> {
+        if self.derive_status() != FileStatus::Skipped {
+            return None;
+        }
+        if self.manual_override == Some(ManualOverride::Skip) {
+            return Some("manually skipped".into());
+        }
+        self.skip_reason.as_ref().map(|r| r.as_str())
+    }
+
+    /// `x` toggle: skip a typeable file, or include a skipped file that has a body.
+    pub fn toggle_override_target(&self) -> Option<ManualOverride> {
+        match self.derive_status() {
+            FileStatus::Skipped => {
+                if self.chunks.is_empty() {
+                    None
+                } else {
+                    Some(ManualOverride::Include)
+                }
+            }
+            FileStatus::Todo | FileStatus::Done => Some(ManualOverride::Skip),
         }
     }
 
@@ -265,5 +326,70 @@ impl TypingMetrics {
             kpm,
             wpm,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, skipped: bool, body: &str) -> FileProgress {
+        FileProgress {
+            relative_path: path.into(),
+            status: if skipped {
+                FileStatus::Skipped
+            } else {
+                FileStatus::Todo
+            },
+            skip_reason: skipped.then_some(SkipReason::TestFile),
+            manual_override: None,
+            chunks: if body.is_empty() {
+                Vec::new()
+            } else {
+                vec![ChunkProgress {
+                    chunk: Chunk {
+                        relative_path: path.into(),
+                        start_line: 1,
+                        end_line: 1,
+                        normalized: body.into(),
+                        hash: "h".into(),
+                    },
+                    completion: ChunkCompletion::Incomplete,
+                    id: Some(1),
+                }]
+            },
+        }
+    }
+
+    #[test]
+    fn manual_skip_wins_over_typeable() {
+        let mut f = file("a.rs", false, "fn a() {}");
+        f.manual_override = Some(ManualOverride::Skip);
+        assert_eq!(f.derive_status(), FileStatus::Skipped);
+        assert_eq!(f.display_skip_reason().as_deref(), Some("manually skipped"));
+    }
+
+    #[test]
+    fn manual_include_wins_over_auto_skip_when_body_exists() {
+        let mut f = file("a.rs", true, "fn a() {}");
+        f.manual_override = Some(ManualOverride::Include);
+        assert_eq!(f.derive_status(), FileStatus::Todo);
+        assert!(f.display_skip_reason().is_none());
+    }
+
+    #[test]
+    fn toggle_skips_typeable_and_includes_skipped_with_body() {
+        let typeable = file("a.rs", false, "fn a() {}");
+        assert_eq!(
+            typeable.toggle_override_target(),
+            Some(ManualOverride::Skip)
+        );
+        let skipped = file("a.rs", true, "fn a() {}");
+        assert_eq!(
+            skipped.toggle_override_target(),
+            Some(ManualOverride::Include)
+        );
+        let empty = file("bin", true, "");
+        assert_eq!(empty.toggle_override_target(), None);
     }
 }

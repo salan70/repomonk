@@ -42,6 +42,13 @@ pub struct TreeView {
     /// Repository-wide `(completed, total)` normalized line counts.
     pub overall: (usize, usize),
     pub hide_skipped: bool,
+    /// Incremental file filter (`/` on Tree).
+    pub filter: String,
+    pub filter_editing: bool,
+    /// Last drawn list height, used for half-page jumps.
+    pub visible_rows: usize,
+    /// Shown after Result Enter when the repository is fully done.
+    pub repo_complete: bool,
 }
 
 impl TreeView {
@@ -56,7 +63,12 @@ impl TreeView {
         dependency_order: Option<Vec<String>>,
     ) -> Self {
         let recommend = recommended_path(progress, dependency_order.as_deref());
-        let rows = flatten(progress, &std::collections::HashSet::new(), hide_skipped);
+        let rows = flatten(
+            progress,
+            &std::collections::HashSet::new(),
+            hide_skipped,
+            "",
+        );
         Self {
             rows,
             selected: 0,
@@ -66,20 +78,20 @@ impl TreeView {
             dependency_order,
             overall: overall_progress(progress),
             hide_skipped,
+            filter: String::new(),
+            filter_editing: false,
+            visible_rows: 1,
+            repo_complete: false,
         }
     }
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
         self.recommend = recommended_path(progress, self.dependency_order.as_deref());
         self.overall = overall_progress(progress);
-        let prev_path = self.selected_file_path();
-        self.rows = flatten(progress, &self.collapsed, self.hide_skipped);
+        let prev_path = self.selected_path();
+        self.rows = flatten(progress, &self.collapsed, self.hide_skipped, &self.filter);
         if let Some(path) = prev_path {
-            if let Some(idx) = self
-                .rows
-                .iter()
-                .position(|r| matches!(&r.kind, TreeRowKind::File { path: p } if p == &path))
-            {
+            if let Some(idx) = self.rows.iter().position(|r| row_path(r) == path) {
                 self.selected = idx;
             } else {
                 self.selected = self.selected.min(self.rows.len().saturating_sub(1));
@@ -121,6 +133,123 @@ impl TreeView {
         })
     }
 
+    pub fn selected_dir_path(&self) -> Option<String> {
+        self.rows.get(self.selected).and_then(|r| match &r.kind {
+            TreeRowKind::Dir { path } => Some(path.clone()),
+            TreeRowKind::File { .. } => None,
+        })
+    }
+
+    pub fn selected_path(&self) -> Option<String> {
+        self.rows.get(self.selected).map(row_path)
+    }
+
+    pub fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.rows.len().saturating_sub(1);
+    }
+
+    pub fn page_by(&mut self, direction: isize) {
+        let step = (self.visible_rows / 2).max(1) as isize * direction;
+        self.move_by(step);
+    }
+
+    pub fn jump_to_path(&mut self, path: &str) -> bool {
+        if let Some(idx) = self
+            .rows
+            .iter()
+            .position(|r| matches!(&r.kind, TreeRowKind::File { path: p } if p == path))
+        {
+            self.selected = idx;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn jump_recommend(&mut self) -> bool {
+        self.recommend
+            .clone()
+            .is_some_and(|path| self.jump_to_path(&path))
+    }
+
+    pub fn next_match(&mut self, backward: bool) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let len = self.rows.len();
+        for offset in 1..=len {
+            let idx = if backward {
+                (self.selected + len - offset) % len
+            } else {
+                (self.selected + offset) % len
+            };
+            if matches!(self.rows[idx].kind, TreeRowKind::File { .. }) {
+                self.selected = idx;
+                return;
+            }
+        }
+    }
+
+    pub fn begin_filter(&mut self) {
+        self.filter_editing = true;
+    }
+
+    pub fn push_filter(&mut self, ch: char, progress: &RepoProgress) {
+        self.filter.push(ch);
+        self.refresh_rows(progress);
+    }
+
+    pub fn pop_filter(&mut self, progress: &RepoProgress) {
+        self.filter.pop();
+        self.refresh_rows(progress);
+    }
+
+    pub fn clear_filter(&mut self, progress: &RepoProgress) {
+        self.filter.clear();
+        self.filter_editing = false;
+        self.refresh_rows(progress);
+    }
+
+    pub fn expand_dir(&mut self, progress: &RepoProgress) {
+        if let Some(path) = self.selected_dir_path() {
+            if self.collapsed.remove(&path) {
+                self.refresh_rows(progress);
+            }
+        }
+    }
+
+    pub fn collapse_or_parent(&mut self, progress: &RepoProgress) {
+        match self.rows.get(self.selected).map(|r| r.kind.clone()) {
+            Some(TreeRowKind::Dir { path }) => {
+                if self.collapsed.insert(path.clone()) {
+                    self.refresh_rows(progress);
+                } else if let Some(parent) = parent_path(&path) {
+                    self.jump_dir(&parent);
+                }
+            }
+            Some(TreeRowKind::File { path }) => {
+                if let Some(parent) = parent_path(&path) {
+                    self.jump_dir(&parent);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn jump_dir(&mut self, path: &str) {
+        if let Some(idx) = self
+            .rows
+            .iter()
+            .position(|r| matches!(&r.kind, TreeRowKind::Dir { path: p } if p == path))
+        {
+            self.selected = idx;
+        }
+    }
+
     pub fn toggle_collapse(&mut self, progress: &RepoProgress) {
         if let Some(TreeRow {
             kind: TreeRowKind::Dir { path },
@@ -158,10 +287,21 @@ fn recommended_path(
     progress.recommend_path().map(str::to_string)
 }
 
+fn row_path(row: &TreeRow) -> String {
+    match &row.kind {
+        TreeRowKind::Dir { path } | TreeRowKind::File { path } => path.clone(),
+    }
+}
+
+fn parent_path(path: &str) -> Option<String> {
+    path.rsplit_once('/').map(|(parent, _)| parent.to_string())
+}
+
 fn flatten(
     progress: &RepoProgress,
     collapsed: &std::collections::HashSet<String>,
     hide_skipped: bool,
+    filter: &str,
 ) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     // Build a simple path-sorted expansion.
@@ -224,7 +364,7 @@ fn flatten(
             } else if !hidden {
                 let status = f.derive_status();
                 let (progress_counts, skip_reason) = if status == FileStatus::Skipped {
-                    (None, f.skip_reason.as_ref().map(|r| r.as_str().to_string()))
+                    (None, f.display_skip_reason())
                 } else {
                     (Some((f.completed_lines(), f.total_lines())), None)
                 };
@@ -241,7 +381,43 @@ fn flatten(
             }
         }
     }
-    rows
+    filter_rows(rows, filter)
+}
+
+fn file_matches_filter(path: &str, name: &str, q: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    if path == q || path.ends_with(&format!("/{q}")) {
+        return true;
+    }
+    if let Some(idx) = name.find(q) {
+        return idx == 0 || matches!(name.as_bytes()[idx - 1], b'.' | b'/' | b'_' | b'-');
+    }
+    false
+}
+
+fn filter_rows(rows: Vec<TreeRow>, filter: &str) -> Vec<TreeRow> {
+    let q = filter.trim().to_ascii_lowercase();
+    if q.is_empty() {
+        return rows;
+    }
+    let matching: Vec<String> = rows
+        .iter()
+        .filter_map(|row| match &row.kind {
+            TreeRowKind::File { path } if file_matches_filter(path, &row.name, &q) => {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    rows.into_iter()
+        .filter(|row| match &row.kind {
+            TreeRowKind::File { path } => matching.iter().any(|p| p == path),
+            TreeRowKind::Dir { path } => matching
+                .iter()
+                .any(|file| file == path || file.starts_with(&format!("{path}/"))),
+        })
+        .collect()
 }
 
 pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
@@ -250,15 +426,26 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let filter_line = view.filter_editing || !view.filter.is_empty();
     let panes = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
+        .constraints(if filter_line {
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ]
+        } else {
+            vec![
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ]
+        })
         .split(inner);
+    let list_pane = if filter_line { panes[2] } else { panes[1] };
+    let footer_pane = if filter_line { panes[3] } else { panes[2] };
 
     // Header: repository-wide progress gauge.
     let (completed, total) = view.overall;
@@ -272,7 +459,11 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         .use_unicode(true)
         .gauge_style(Style::default().fg(theme::BLUE).bg(theme::CURRENT_LINE_BG))
         .label(Span::styled(
-            format!("{completed}/{total} lines · {:.0}%", ratio * 100.0),
+            if view.repo_complete {
+                format!("{completed}/{total} lines · 100% · repo complete")
+            } else {
+                format!("{completed}/{total} lines · {:.0}%", ratio * 100.0)
+            },
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ));
     let gauge_area = Rect {
@@ -282,6 +473,23 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         height: panes[0].height,
     };
     frame.render_widget(gauge, gauge_area);
+
+    if filter_line {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" /", Style::default().fg(theme::CYAN)),
+                Span::styled(
+                    view.filter.clone(),
+                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    if view.filter_editing { "▌" } else { "" },
+                    Style::default().fg(theme::CYAN),
+                ),
+            ])),
+            panes[1],
+        );
+    }
 
     // Body: tree rows.
     let items: Vec<ListItem> = view
@@ -297,28 +505,20 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     let list = List::new(items)
         .highlight_style(Style::default().bg(theme::SELECTION_BG))
         .style(theme::base_style());
-    frame.render_stateful_widget(list, panes[2], &mut state);
+    frame.render_stateful_widget(list, list_pane, &mut state);
 
-    // Footer: key hints.
-    frame.render_widget(
-        Paragraph::new(theme::key_hints(if view.dependency_order.is_some() {
-            &[
-                ("j/k", "move"),
-                ("Enter", "open"),
-                ("e", "set entry"),
-                ("Space", "fold"),
-                ("q/Esc", "quit"),
-            ]
-        } else {
-            &[
-                ("j/k", "move"),
-                ("Enter", "open"),
-                ("Space", "fold"),
-                ("q/Esc", "quit"),
-            ]
-        })),
-        panes[3],
-    );
+    let hints = if view.filter_editing {
+        &[("n/N", "next"), ("Esc", "clear"), ("?", "help")][..]
+    } else {
+        &[
+            ("Enter", "open"),
+            ("j/k", "move"),
+            ("Tab", "recommend"),
+            ("Esc", "back"),
+            ("?", "help"),
+        ][..]
+    };
+    frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer_pane);
 }
 
 fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
@@ -399,4 +599,61 @@ fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::content::{
+        Chunk, ChunkCompletion, ChunkProgress, FileProgress, FileStatus, RepoProgress,
+    };
+
+    fn progress() -> RepoProgress {
+        let file = |path: &str, body: &str| FileProgress {
+            relative_path: path.into(),
+            status: FileStatus::Todo,
+            skip_reason: None,
+            manual_override: None,
+            chunks: vec![ChunkProgress {
+                chunk: Chunk {
+                    relative_path: path.into(),
+                    start_line: 1,
+                    end_line: 1,
+                    normalized: body.into(),
+                    hash: path.into(),
+                },
+                completion: ChunkCompletion::Incomplete,
+                id: Some(1),
+            }],
+        };
+        RepoProgress {
+            files: vec![
+                file("src/a.rs", "a"),
+                file("src/b.rs", "b"),
+                file("lib.rs", "l"),
+            ],
+        }
+    }
+
+    #[test]
+    fn filter_keeps_matching_file_and_parent() {
+        let progress = progress();
+        let mut tree = TreeView::from_progress("demo", &progress, false);
+        tree.filter = "b.rs".into();
+        tree.refresh_rows(&progress);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"src"));
+        assert!(names.contains(&"b.rs"));
+        assert!(!names.contains(&"a.rs"));
+        assert!(!names.contains(&"lib.rs"));
+    }
+
+    #[test]
+    fn jump_recommend_selects_first_todo() {
+        let progress = progress();
+        let mut tree = TreeView::from_progress("demo", &progress, false);
+        tree.selected = tree.rows.len() - 1;
+        assert!(tree.jump_recommend());
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+    }
 }

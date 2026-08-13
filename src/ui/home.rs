@@ -40,6 +40,14 @@ impl HomeView {
     pub fn selected_input(&self) -> Option<&str> {
         self.recent.get(self.selected).map(|r| r.input.as_str())
     }
+
+    pub fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.recent.len().saturating_sub(1);
+    }
 }
 
 pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms: u64) {
@@ -70,7 +78,7 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms
     } else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  Select a recent repo or press s to search",
+                "  Select a recent repo or press / to search",
                 Style::default().fg(theme::MUTED).bg(theme::BG),
             ))),
             chunks[3],
@@ -78,12 +86,11 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms
     }
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("j/k", "select"),
             ("Enter", "open"),
-            ("s", "search"),
-            ("g", "stats"),
-            ("c", "settings"),
+            ("j/k", "select"),
+            ("/", "search"),
             ("q", "quit"),
+            ("?", "help"),
         ])),
         chunks[4],
     );
@@ -238,8 +245,9 @@ pub fn draw_search_modal(frame: &mut Frame, area: Rect, search: &SearchState) {
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
             confirm_hint,
-            ("j/k", "select"),
+            ("↑/↓", "select"),
             ("Esc", "close"),
+            ("?", "help"),
         ])),
         panes[3],
     );

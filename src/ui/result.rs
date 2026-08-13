@@ -11,6 +11,7 @@ use crate::ui::theme;
 
 #[derive(Debug, Clone)]
 pub struct ResultView {
+    pub repo: String,
     pub path: String,
     pub completed: bool,
     pub metrics: TypingMetrics,
@@ -22,18 +23,19 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
 
     let card_width = (view.path.chars().count() as u16 + 8).clamp(46, area.width);
     let card = theme::centered_rect(area, card_width, 15);
-    let block = theme::bordered_block(theme::title_line("Result"));
+    let title = if view.repo.is_empty() {
+        view.path.clone()
+    } else {
+        format!("{} › {}", view.repo, view.path)
+    };
+    let block = theme::bordered_block(theme::title_line(&title));
     let inner = block.inner(card);
     frame.render_widget(block, card);
 
-    let (headline, color) = if view.completed {
-        if view.file_done {
-            ("✓ File complete", theme::GREEN)
-        } else {
-            ("✓ Session complete", theme::GREEN)
-        }
+    let (headline, color) = if view.file_done {
+        ("✓ File complete", theme::GREEN)
     } else {
-        ("✗ Interrupted", theme::YELLOW)
+        ("✓ Session complete", theme::GREEN)
     };
 
     let m = &view.metrics;
@@ -70,8 +72,13 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
         metric("misses", format!("{}", m.misses)),
         metric("time", format!("{:.1}s", m.elapsed_ms as f64 / 1000.0)),
         Line::from(""),
-        theme::key_hints(&[("Enter", "home"), ("Esc/t/r", "tree"), ("q", "quit")])
-            .alignment(Alignment::Center),
+        theme::key_hints(&[
+            ("Enter", "next"),
+            ("r", "retry"),
+            ("Esc", "back"),
+            ("?", "help"),
+        ])
+        .alignment(Alignment::Center),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }

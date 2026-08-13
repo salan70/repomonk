@@ -109,6 +109,7 @@ mod tests {
                     relative_path: "src/a.rs".into(),
                     status: FileStatus::Todo,
                     skip_reason: None,
+                    manual_override: None,
                     chunks: vec![ChunkProgress {
                         chunk: chunk("src/a.rs", "1", "a1\na2\na3"),
                         completion: ChunkCompletion::Complete,
@@ -119,6 +120,7 @@ mod tests {
                     relative_path: "src/b.rs".into(),
                     status: FileStatus::Todo,
                     skip_reason: None,
+                    manual_override: None,
                     chunks: vec![ChunkProgress {
                         chunk: chunk("src/b.rs", "2", "b1\nb2"),
                         completion: ChunkCompletion::Incomplete,
@@ -129,6 +131,7 @@ mod tests {
                     relative_path: "README.md".into(),
                     status: FileStatus::Skipped,
                     skip_reason: Some(SkipReason::NoChunks),
+                    manual_override: None,
                     chunks: vec![],
                 },
             ],
