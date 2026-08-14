@@ -24,7 +24,12 @@ pub enum HelpContext {
 
 pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
     theme::fill_background(frame, area);
-    let card = theme::centered_rect(area, area.width.saturating_sub(8).min(72), 20);
+    let card_height = match ctx {
+        HelpContext::Tree => 32,
+        HelpContext::Home => 26,
+        _ => 20,
+    };
+    let card = theme::centered_rect(area, area.width.saturating_sub(8).min(72), card_height);
     frame.render_widget(Clear, card);
     let block = theme::bordered_block(theme::title_line("Help"));
     let inner = block.inner(card);
@@ -49,9 +54,9 @@ pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
             hint("✓", "done"),
             hint("○", "todo"),
             hint("·", "skipped"),
-            hint("[n/m lines]", "progress"),
-            hint("▸ recommend", "next file"),
-            hint("▸ next", "next flow file"),
+            hint("█░", "dir progress"),
+            hint("— reason", "why skipped"),
+            hint("▸ Next", "next file"),
             hint("—", "outside flow"),
             hint("123", "flow order"),
         ]);
@@ -96,7 +101,8 @@ fn context_lines(ctx: HelpContext) -> Vec<Line<'static>> {
             hint("Enter", "open"),
             hint("j/k", "move"),
             hint("g/G", "first / last"),
-            hint("Tab", "next"),
+            hint("Ctrl-d/u", "half page"),
+            hint("Tab", "next file"),
             hint("/", "filter"),
             hint("x/X", "skip / reset"),
             hint("h/l", "fold"),

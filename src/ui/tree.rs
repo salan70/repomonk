@@ -691,16 +691,9 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     frame.render_stateful_widget(list, list_pane, &mut state);
 
     let hints = if view.filter_editing {
-        &[("n/N", "next"), ("Esc", "clear"), ("?", "help")][..]
+        &[("Esc", "clear"), ("n/N", "next"), ("?", "more")][..]
     } else {
-        &[
-            ("Enter", "open"),
-            ("j/k", "move"),
-            ("Tab", "next"),
-            ("e", "flow"),
-            ("t", "types"),
-            ("?", "help"),
-        ][..]
+        &[("Enter", "open"), ("j/k", "move"), ("?", "more")][..]
     };
     frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer_pane);
 }
