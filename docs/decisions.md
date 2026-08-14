@@ -551,12 +551,21 @@ Splashは場所ではなく起動演出とし、任意キーでスキップす�
 
 - 種別キーは「拡張子があれば小文字化した`.ext`、無ければファイル名そのもの」とする
   （`LICENSE`・`Makefile`・`Dockerfile`・`.gitignore`もこの規則でファイル名単位のキーになる）。
-- 設定はSQLiteの`repo_file_types(repository_id, type_key, enabled)`へリポジトリ単位で保存し、
+- 状態は`Included`/`Excluded`/`Hidden`の3値とする。`Excluded`は対象外理由付きでツリーに
+  表示し、`Hidden`は対象外にした上でツリーから完全に取り除く（配下すべてが非表示の
+  ディレクトリも非表示にする）。File typesオーバーレイの`Space`/`Enter`はこの順で巡回する。
+- 種別ごとのデフォルト値は、拡張子を持たないファイル（`LICENSE`・`Makefile`・`.gitignore`
+  等のドットファイルを含む）は`Excluded`固定とし、拡張子を持つファイルはそのリポジトリの
+  現在の自動判定（対象なら`Included`、対象外なら`Excluded`）から導出する。
+- 設定はSQLiteの`repo_file_types(repository_id, type_key, state)`へリポジトリ単位で保存し、
   `config.toml`は変更しない。
 - 優先順位は「手動上書き（`x`/`X`） > 種別トグル > `include_tests`/`include_configs`の自動判定」。
   ただし`include_tests`によるテスト判定はパスベースの別軸であり、種別トグルでは上書きしない。
-- 除外は新しい`SkipReason::FileTypeDisabled`とし、既存の`skip_reason`経路（ツリー表示、進捗集計、
-  `global_summary`のSQL）へそのまま乗せる。追加の述語重複は作らない。
+- 除外（`Excluded`・`Hidden`とも）は新しい`SkipReason::FileTypeDisabled`とし、既存の
+  `skip_reason`経路（ツリー表示、進捗集計、`global_summary`のSQL）へそのまま乗せる。
+  `Hidden`のツリー非表示は`skip_reason`とは別軸で、`TreeView`が保持する非表示パス集合
+  （スキャン結果と保存済み種別設定から都度計算）で実現し、既存の`hide_skipped`設定とは
+  独立に効かせる。追加の述語重複は作らない。
 - 保存済み設定が空（そのリポジトリで一度も保存していない）のときだけ、リポジトリを開いた直後に
   File typesオーバーレイを自動表示する。閉じるときは変更の有無に関わらず一覧の全種別を明示的に
   保存し、以後は自動表示しない。
@@ -564,15 +573,23 @@ Splashは場所ではなく起動演出とし、任意キーでスキップす�
 - 設定変更は再スキャンで反映する。再スキャンは正規化本文ハッシュで完了状態を引き継ぎ、
   `manual_override`は書き換えない。写経可能なファイルが1つも残らない設定になった場合は
   直前の設定へ戻して元のセッションを維持し、エラーを表示する。
+- File typesオーバーレイはTypingの`Esc`（Pause）と同様、Treeを背景に残したまま中央に浮かせる
+  ダイアログとして描画する。Settings/Statsのように全画面を上書きする表示にはしない。
 
 ### 理由
 
 `LICENSE`のように拡張子を持たないファイルは既存の`CONFIG_NAMES`/`CONFIG_EXTENSIONS`に
 入っておらず、常に写経対象になってしまう。逆に`.md`や`.json`は`include_configs`で一括
 オン・オフしかできず粒度が粗い。プロジェクトごとにまばらに現れる「写経したくないファイル」を
-拾うには、実在するファイル種別を一覧して個別にトグルできる層が要る。
+拾うには、実在するファイル種別を一覧して個別にトグルできる層が要る。対象外理由をツリーに
+出したままだと大量のノイズになる種別（バイナリに近いデータファイルや意図的に無視したい
+ディレクトリ相当の種別）もあるため、「表示はするが対象外」と「そもそも表示しない」を分けた。
+拡張子なしファイルは既定を`Excluded`にすることで、`LICENSE`が写経対象へ紛れ込む問題を
+オーバーレイを開かなくても解消する。
 
 ### 影響
 
 - `WalkOptions`に`file_types: FileTypePrefs`を追加し、`Copy`ではなく`Clone`にする。
+- `TreeView::from_progress_with_order`の上位に`hidden_paths`を渡す
+  `TreeView::from_progress_full`を追加する。
 - `docs/product-requirements.md`§5.1、§9.2、§9.3を更新する。

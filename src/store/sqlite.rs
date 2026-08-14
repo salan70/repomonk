@@ -10,7 +10,7 @@ use crate::domain::content::{
     ChunkCompletion, ChunkProgress, FileProgress, FileStatus, ManualOverride, RepoProgress,
     ResolvedRepository, ScanResult, SessionSummary, SkipReason, TypingCheckpoint,
 };
-use crate::domain::file_type::FileTypePrefs;
+use crate::domain::file_type::{FileTypePrefs, FileTypeState};
 use crate::Error;
 
 /// A previously opened repository for the home Recent list.
@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS typing_checkpoints (
 CREATE TABLE IF NOT EXISTS repo_file_types (
     repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
     type_key TEXT NOT NULL,
-    enabled INTEGER NOT NULL,
+    state TEXT NOT NULL,
     PRIMARY KEY (repository_id, type_key)
 );
 
@@ -482,14 +482,17 @@ impl SqliteStore {
     pub fn load_file_type_prefs(&self, repo_id: i64) -> crate::Result<FileTypePrefs> {
         let mut stmt = self
             .conn
-            .prepare("SELECT type_key, enabled FROM repo_file_types WHERE repository_id = ?1")?;
-        let rows: std::collections::HashMap<String, bool> = stmt
+            .prepare("SELECT type_key, state FROM repo_file_types WHERE repository_id = ?1")?;
+        let rows: std::collections::HashMap<String, FileTypeState> = stmt
             .query_map(params![repo_id], |row| {
                 let key: String = row.get(0)?;
-                let enabled: i64 = row.get(1)?;
-                Ok((key, enabled != 0))
+                let state: String = row.get(1)?;
+                Ok((key, state))
             })?
-            .collect::<std::result::Result<_, _>>()?;
+            .collect::<std::result::Result<Vec<(String, String)>, _>>()?
+            .into_iter()
+            .filter_map(|(key, state)| FileTypeState::parse(&state).map(|s| (key, s)))
+            .collect();
         Ok(FileTypePrefs::new(rows))
     }
 
@@ -497,17 +500,17 @@ impl SqliteStore {
     pub fn save_file_type_prefs(
         &mut self,
         repo_id: i64,
-        prefs: &[(String, bool)],
+        prefs: &[(String, FileTypeState)],
     ) -> crate::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM repo_file_types WHERE repository_id = ?1",
             params![repo_id],
         )?;
-        for (key, enabled) in prefs {
+        for (key, state) in prefs {
             tx.execute(
-                "INSERT INTO repo_file_types(repository_id, type_key, enabled) VALUES (?1, ?2, ?3)",
-                params![repo_id, key, if *enabled { 1 } else { 0 }],
+                "INSERT INTO repo_file_types(repository_id, type_key, state) VALUES (?1, ?2, ?3)",
+                params![repo_id, key, state.as_str()],
             )?;
         }
         tx.commit()?;
@@ -1236,25 +1239,33 @@ mod tests {
         store
             .save_file_type_prefs(
                 repo_id,
-                &[(".rs".to_string(), true), (".md".to_string(), false)],
+                &[
+                    (".rs".to_string(), FileTypeState::Included),
+                    (".md".to_string(), FileTypeState::Excluded),
+                    (".png".to_string(), FileTypeState::Hidden),
+                ],
             )
             .unwrap();
         let prefs = store.load_file_type_prefs(repo_id).unwrap();
-        assert_eq!(prefs.get(".rs"), Some(true));
-        assert_eq!(prefs.get(".md"), Some(false));
+        assert_eq!(prefs.get(".rs"), Some(FileTypeState::Included));
+        assert_eq!(prefs.get(".md"), Some(FileTypeState::Excluded));
+        assert_eq!(prefs.get(".png"), Some(FileTypeState::Hidden));
         assert_eq!(prefs.get(".json"), None);
 
         // Refresh should not clear saved prefs.
         store.sync_scan(&repo, &scan, true).unwrap();
         let prefs_after_refresh = store.load_file_type_prefs(repo_id).unwrap();
-        assert_eq!(prefs_after_refresh.get(".rs"), Some(true));
+        assert_eq!(
+            prefs_after_refresh.get(".rs"),
+            Some(FileTypeState::Included)
+        );
 
         // Overwrite replaces the full set.
         store
-            .save_file_type_prefs(repo_id, &[(".rs".to_string(), false)])
+            .save_file_type_prefs(repo_id, &[(".rs".to_string(), FileTypeState::Excluded)])
             .unwrap();
         let overwritten = store.load_file_type_prefs(repo_id).unwrap();
-        assert_eq!(overwritten.get(".rs"), Some(false));
+        assert_eq!(overwritten.get(".rs"), Some(FileTypeState::Excluded));
         assert_eq!(overwritten.get(".md"), None);
 
         store

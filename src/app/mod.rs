@@ -14,7 +14,7 @@ use crate::domain::content::{
     TypingCheckpoint, TypingMetrics,
 };
 use crate::domain::dependency::{order_files, uses_dependency_mode};
-use crate::domain::file_type::FileTypePrefs;
+use crate::domain::file_type::{hidden_paths, FileTypePrefs, FileTypeState};
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
 use crate::scan::extract::ExtractOptions;
 use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
@@ -100,6 +100,13 @@ struct DependencySettings {
     import_edges: Vec<(String, String)>,
     mode: ProgressMode,
     direction: DependencyDirection,
+}
+
+/// Tree-display flags that come from user config plus the current file-type prefs.
+struct DisplaySettings {
+    hide_skipped: bool,
+    show_file_types_overlay: bool,
+    hidden_paths: std::collections::HashSet<String>,
 }
 
 pub struct App {
@@ -499,7 +506,7 @@ impl App {
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
                 if let Some(view) = &mut self.file_types {
-                    view.toggle_selected();
+                    view.cycle_selected();
                 }
                 Ok(false)
             }
@@ -520,7 +527,7 @@ impl App {
         let input = session.repo.input.clone();
         let selected_path = session.tree.selected_path();
 
-        let old_prefs: Vec<(String, bool)> = self
+        let old_prefs: Vec<(String, FileTypeState)> = self
             .store
             .load_file_type_prefs(repo_id)
             .unwrap_or_default()
@@ -1510,8 +1517,11 @@ fn load_session(
                     mode: cfg.user.progress.mode,
                     direction: cfg.user.progress.dependency_direction,
                 },
-                cfg.user.progress.hide_skipped,
-                false,
+                DisplaySettings {
+                    hide_skipped: cfg.user.progress.hide_skipped,
+                    show_file_types_overlay: false,
+                    hidden_paths: std::collections::HashSet::new(),
+                },
             ));
         }
     }
@@ -1521,7 +1531,7 @@ fn load_session(
         None => FileTypePrefs::default(),
     };
     let show_file_types_overlay = saved_prefs.is_empty();
-    let walk = walk_options(&cfg.user, saved_prefs);
+    let walk = walk_options(&cfg.user, saved_prefs.clone());
 
     let (progress_repo, scan, single_file) = if resolved.root.is_dir() {
         let scan = scan_repository(&resolved.root, walk)?;
@@ -1538,6 +1548,7 @@ fn load_session(
         &scan,
         cfg.user.progress.keep_done_on_refresh,
     )?;
+    let hidden = hidden_paths(&progress, &saved_prefs);
     let import_edges = scan.import_edges.clone();
     Ok(RepoSession::from_parts(
         progress_repo,
@@ -1549,8 +1560,11 @@ fn load_session(
             mode: cfg.user.progress.mode,
             direction: cfg.user.progress.dependency_direction,
         },
-        cfg.user.progress.hide_skipped,
-        show_file_types_overlay,
+        DisplaySettings {
+            hide_skipped: cfg.user.progress.hide_skipped,
+            show_file_types_overlay,
+            hidden_paths: hidden,
+        },
     ))
 }
 
@@ -1577,8 +1591,7 @@ impl RepoSession {
         progress: RepoProgress,
         single_file: Option<String>,
         dependency: DependencySettings,
-        hide_skipped: bool,
-        show_file_types_overlay: bool,
+        display: DisplaySettings,
     ) -> Self {
         let dependency_mode = uses_dependency_mode(dependency.mode)
             && !dependency.import_edges.is_empty()
@@ -1596,11 +1609,13 @@ impl RepoSession {
                 None,
             )
         });
-        let tree = TreeView::from_progress_with_order(
+        let show_file_types_overlay = display.show_file_types_overlay;
+        let tree = TreeView::from_progress_full(
             &repo.display_name,
             &progress,
-            hide_skipped,
+            display.hide_skipped,
             ordered_paths.clone(),
+            display.hidden_paths,
         );
         Self {
             repo,
@@ -2167,6 +2182,49 @@ mod tests {
     }
 
     #[test]
+    fn hiding_file_type_removes_files_and_rolls_up_empty_dirs_from_tree() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::create_dir(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/a.md"), "a\n").unwrap();
+        std::fs::write(dir.path().join("docs/b.md"), "b\n").unwrap();
+        let state_dir = tempdir().unwrap();
+        let db = state_dir.path().join("db.sqlite");
+        let cache = state_dir.path().join("cache");
+        let mut app = headless::open_local(dir.path().to_str().unwrap(), &db, &cache).unwrap();
+
+        headless::press_char(&mut app, 't').unwrap();
+        let md_idx = app
+            .file_types
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|e| e.key == ".md")
+            .unwrap();
+        app.file_types.as_mut().unwrap().selected = md_idx;
+        headless::press_char(&mut app, ' ').unwrap();
+        assert_eq!(
+            app.file_types.as_ref().unwrap().entries[md_idx].state,
+            crate::domain::file_type::FileTypeState::Hidden
+        );
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+
+        let paths: Vec<_> = app
+            .session
+            .as_ref()
+            .unwrap()
+            .tree
+            .rows
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        assert!(!paths.contains(&"docs".to_string()));
+        assert!(!paths.contains(&"a.md".to_string()));
+        assert!(paths.contains(&"main.rs".to_string()));
+    }
+
+    #[test]
     fn file_types_overlay_opens_on_first_open_only() {
         let repo = types_repo_dir();
         let state_dir = tempdir().unwrap();
@@ -2237,7 +2295,17 @@ mod tests {
             .position(|e| e.key == ".md")
             .unwrap();
         app.file_types.as_mut().unwrap().selected = md_idx;
+        // Default is Excluded; cycle Excluded -> Hidden -> Included.
         headless::press_char(&mut app, ' ').unwrap();
+        assert_eq!(
+            app.file_types.as_ref().unwrap().entries[md_idx].state,
+            crate::domain::file_type::FileTypeState::Hidden
+        );
+        headless::press_char(&mut app, ' ').unwrap();
+        assert_eq!(
+            app.file_types.as_ref().unwrap().entries[md_idx].state,
+            crate::domain::file_type::FileTypeState::Included
+        );
         headless::press(&mut app, KeyCode::Esc).unwrap();
 
         assert_eq!(headless::overlay_name(&app), None);

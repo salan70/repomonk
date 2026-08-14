@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::domain::content::{FileStatus, ScanResult, ScannedFile, SkipReason};
-use crate::domain::file_type::{file_type_key, FileTypePrefs};
+use crate::domain::file_type::{file_type_key, FileTypePrefs, FileTypeState};
 use crate::scan::deps::collect_edges;
 use crate::scan::extract::{extract_chunks, ExtractOptions};
 
@@ -214,9 +214,12 @@ fn classify_file(root: &Path, path: &Path, opts: &WalkOptions) -> ScannedFile {
     }
 
     let type_key = file_type_key(&relative);
-    let type_enabled = opts.file_types.get(&type_key);
+    let type_state = opts.file_types.get(&type_key);
 
-    if type_enabled == Some(false) {
+    if matches!(
+        type_state,
+        Some(FileTypeState::Excluded) | Some(FileTypeState::Hidden)
+    ) {
         return skipped(relative, SkipReason::FileTypeDisabled);
     }
 
@@ -224,7 +227,10 @@ fn classify_file(root: &Path, path: &Path, opts: &WalkOptions) -> ScannedFile {
         return skipped(relative, SkipReason::TestFile);
     }
 
-    if type_enabled != Some(true) && !opts.include_configs && is_config_path(&relative, &name) {
+    if type_state != Some(FileTypeState::Included)
+        && !opts.include_configs
+        && is_config_path(&relative, &name)
+    {
         return skipped(relative, SkipReason::ConfigFile);
     }
 
@@ -560,7 +566,35 @@ mod tests {
         fs::write(root.join("src.rs"), source_body()).unwrap();
 
         let mut prefs = std::collections::HashMap::new();
-        prefs.insert(".rs".to_string(), false);
+        prefs.insert(
+            ".rs".to_string(),
+            crate::domain::file_type::FileTypeState::Excluded,
+        );
+        let opts = WalkOptions {
+            file_types: crate::domain::file_type::FileTypePrefs::new(prefs),
+            ..WalkOptions::default()
+        };
+        let result = scan_repository(root, opts).unwrap();
+        let file = result
+            .files
+            .iter()
+            .find(|f| f.relative_path == "src.rs")
+            .unwrap();
+        assert_eq!(file.status, FileStatus::Skipped);
+        assert_eq!(file.skip_reason, Some(SkipReason::FileTypeDisabled));
+    }
+
+    #[test]
+    fn file_type_hidden_is_also_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("src.rs"), source_body()).unwrap();
+
+        let mut prefs = std::collections::HashMap::new();
+        prefs.insert(
+            ".rs".to_string(),
+            crate::domain::file_type::FileTypeState::Hidden,
+        );
         let opts = WalkOptions {
             file_types: crate::domain::file_type::FileTypePrefs::new(prefs),
             ..WalkOptions::default()
@@ -584,7 +618,10 @@ mod tests {
         fs::write(root.join("tests/README.md"), "documentation\n").unwrap();
 
         let mut prefs = std::collections::HashMap::new();
-        prefs.insert(".md".to_string(), true);
+        prefs.insert(
+            ".md".to_string(),
+            crate::domain::file_type::FileTypeState::Included,
+        );
         let opts = WalkOptions {
             file_types: crate::domain::file_type::FileTypePrefs::new(prefs),
             ..WalkOptions::default()

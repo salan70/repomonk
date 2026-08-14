@@ -133,7 +133,7 @@ fn context_lines(ctx: HelpContext) -> Vec<Line<'static>> {
         ],
         HelpContext::FileTypes => vec![
             hint("j/k", "move"),
-            hint("Space/Enter", "toggle"),
+            hint("Space/Enter", "cycle: on / off / hide"),
             hint("Esc/q/t", "apply & close"),
         ],
     }

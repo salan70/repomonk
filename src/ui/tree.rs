@@ -51,6 +51,9 @@ pub struct TreeView {
     pub repo_complete: bool,
     /// One-line status/error banner (e.g. from the File types overlay), cleared on next input.
     pub message: Option<String>,
+    /// Paths whose file type is set to `Hidden`: excluded from the tree unconditionally,
+    /// regardless of `hide_skipped`. Rolls up to hide a directory whose files are all hidden.
+    pub hidden_paths: std::collections::HashSet<String>,
 }
 
 impl TreeView {
@@ -64,11 +67,28 @@ impl TreeView {
         hide_skipped: bool,
         dependency_order: Option<Vec<String>>,
     ) -> Self {
+        Self::from_progress_full(
+            repo_name,
+            progress,
+            hide_skipped,
+            dependency_order,
+            std::collections::HashSet::new(),
+        )
+    }
+
+    pub fn from_progress_full(
+        repo_name: &str,
+        progress: &RepoProgress,
+        hide_skipped: bool,
+        dependency_order: Option<Vec<String>>,
+        hidden_paths: std::collections::HashSet<String>,
+    ) -> Self {
         let recommend = recommended_path(progress, dependency_order.as_deref());
         let rows = flatten(
             progress,
             &std::collections::HashSet::new(),
             hide_skipped,
+            &hidden_paths,
             "",
         );
         Self {
@@ -85,6 +105,7 @@ impl TreeView {
             visible_rows: 1,
             repo_complete: false,
             message: None,
+            hidden_paths,
         }
     }
 
@@ -92,7 +113,13 @@ impl TreeView {
         self.recommend = recommended_path(progress, self.dependency_order.as_deref());
         self.overall = overall_progress(progress);
         let prev_path = self.selected_path();
-        self.rows = flatten(progress, &self.collapsed, self.hide_skipped, &self.filter);
+        self.rows = flatten(
+            progress,
+            &self.collapsed,
+            self.hide_skipped,
+            &self.hidden_paths,
+            &self.filter,
+        );
         if let Some(path) = prev_path {
             if let Some(idx) = self.rows.iter().position(|r| row_path(r) == path) {
                 self.selected = idx;
@@ -315,13 +342,16 @@ fn flatten(
     progress: &RepoProgress,
     collapsed: &std::collections::HashSet<String>,
     hide_skipped: bool,
+    hidden_paths: &std::collections::HashSet<String>,
     filter: &str,
 ) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     // Build a simple path-sorted expansion.
     let mut dirs: Vec<String> = Vec::new();
     for f in &progress.files {
-        if hide_skipped && f.derive_status() == FileStatus::Skipped {
+        if hidden_paths.contains(&f.relative_path)
+            || (hide_skipped && f.derive_status() == FileStatus::Skipped)
+        {
             continue;
         }
         let parts: Vec<&str> = f.relative_path.split('/').collect();
@@ -344,7 +374,9 @@ fn flatten(
     // Emit via DFS on sorted unique paths.
     let mut emitted_dirs = std::collections::HashSet::new();
     for f in &progress.files {
-        if hide_skipped && f.derive_status() == FileStatus::Skipped {
+        if hidden_paths.contains(&f.relative_path)
+            || (hide_skipped && f.derive_status() == FileStatus::Skipped)
+        {
             continue;
         }
         let parts: Vec<&str> = f.relative_path.split('/').collect();
@@ -697,5 +729,31 @@ mod tests {
 
         tree.move_by(1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("lib.rs"));
+    }
+
+    #[test]
+    fn hidden_paths_hide_files_and_rolls_up_empty_dirs() {
+        let progress = progress();
+        let mut hidden = std::collections::HashSet::new();
+        hidden.insert("src/a.rs".to_string());
+        hidden.insert("src/b.rs".to_string());
+        let tree = TreeView::from_progress_full("demo", &progress, false, None, hidden);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(!names.contains(&"src"));
+        assert!(!names.contains(&"a.rs"));
+        assert!(!names.contains(&"b.rs"));
+        assert!(names.contains(&"lib.rs"));
+    }
+
+    #[test]
+    fn hidden_paths_still_hide_after_refresh() {
+        let progress = progress();
+        let mut hidden = std::collections::HashSet::new();
+        hidden.insert("lib.rs".to_string());
+        let mut tree = TreeView::from_progress_full("demo", &progress, false, None, hidden);
+        tree.refresh_rows(&progress);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(!names.contains(&"lib.rs"));
+        assert!(names.contains(&"a.rs"));
     }
 }
