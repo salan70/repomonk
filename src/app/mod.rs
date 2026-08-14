@@ -2332,7 +2332,11 @@ mod tests {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
         let db = dir.path().join("db.sqlite");
         let cache = dir.path().join("cache");
-        let mut app = headless::open_local(fixture.to_str().unwrap(), &db, &cache).unwrap();
+        let mut user = UserConfig::default();
+        user.progress.hide_skipped = false;
+        let mut app =
+            headless::open_local_with_user_config(fixture.to_str().unwrap(), &db, &cache, user)
+                .unwrap();
         let path = app.progress().recommend_path().unwrap().to_string();
         assert!(
             app.session
@@ -2349,7 +2353,11 @@ mod tests {
                 .map(|f| f.derive_status()),
             Some(FileStatus::Skipped)
         );
-        let mut app2 = headless::open_local(fixture.to_str().unwrap(), &db, &cache).unwrap();
+        let mut user = UserConfig::default();
+        user.progress.hide_skipped = false;
+        let mut app2 =
+            headless::open_local_with_user_config(fixture.to_str().unwrap(), &db, &cache, user)
+                .unwrap();
         assert_eq!(
             app2.progress()
                 .files

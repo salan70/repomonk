@@ -116,7 +116,7 @@ impl Default for UserConfig {
                 mode: ProgressMode::Manual,
                 dependency_direction: DependencyDirection::TopDown,
                 keep_done_on_refresh: true,
-                hide_skipped: false,
+                hide_skipped: true,
             },
             fx: FxConfig {
                 enabled: true,
@@ -435,7 +435,7 @@ show_live_speed = false
 mode = "manual"
 dependency_direction = "top_down"
 keep_done_on_refresh = true
-hide_skipped = false
+hide_skipped = true
 
 [fx]
 enabled = true

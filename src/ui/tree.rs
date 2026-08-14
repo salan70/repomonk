@@ -731,7 +731,7 @@ fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::domain::content::{
-        Chunk, ChunkCompletion, ChunkProgress, FileProgress, FileStatus, RepoProgress,
+        Chunk, ChunkCompletion, ChunkProgress, FileProgress, FileStatus, RepoProgress, SkipReason,
     };
 
     fn progress() -> RepoProgress {
@@ -760,6 +760,36 @@ mod tests {
                 file("lib.rs", "l"),
             ],
         }
+    }
+
+    fn skipped_file(path: &str, reason: SkipReason) -> FileProgress {
+        FileProgress {
+            relative_path: path.into(),
+            status: FileStatus::Skipped,
+            skip_reason: Some(reason),
+            manual_override: None,
+            chunks: vec![],
+        }
+    }
+
+    #[test]
+    fn hide_skipped_default_removes_skipped_rows_and_empty_dirs() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        progress
+            .files
+            .push(skipped_file("docs/readme.md", SkipReason::ConfigFile));
+        let tree = TreeView::from_progress("demo", &progress, true);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(!names.contains(&"tests"));
+        assert!(!names.contains(&"foo.rs"));
+        assert!(!names.contains(&"docs"));
+        assert!(!names.contains(&"readme.md"));
+        assert!(names.contains(&"src"));
+        assert!(names.contains(&"a.rs"));
+        assert!(names.contains(&"lib.rs"));
     }
 
     #[test]
