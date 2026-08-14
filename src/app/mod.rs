@@ -11,7 +11,7 @@ use crate::config::{save as save_user_config, UserConfig};
 use crate::config::{DependencyDirection, ProgressMode};
 use crate::domain::content::{
     ChunkCompletion, FileStatus, ManualOverride, RepoProgress, ResolvedRepository, SessionSummary,
-    TypingMetrics,
+    TypingCheckpoint, TypingMetrics,
 };
 use crate::domain::dependency::{order_files, uses_dependency_mode};
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
@@ -79,6 +79,8 @@ struct RepoSession {
     typing_syntax_colors: Option<Vec<Color>>,
     typing_chunk_id: i64,
     session_started_at: String,
+    typing_auto_indent: bool,
+    typing_checkpoint_last_saved_ms: u64,
     result: Option<ResultView>,
     single_file: Option<String>,
     import_edges: Vec<(String, String)>,
@@ -292,18 +294,19 @@ impl App {
                 }
                 let finished = self.session.as_mut().and_then(|session| {
                     let engine = session.engine.as_mut()?;
-                    engine.apply(TypingCommand::Tick {
-                        now_ms: now_millis(),
-                    });
+                    let now_ms = now_millis();
+                    engine.apply(TypingCommand::Tick { now_ms });
                     let state = engine.snapshot().state;
-                    if state == SessionState::Completed || state == SessionState::Interrupted {
-                        Some(state == SessionState::Completed)
+                    if state == SessionState::Completed {
+                        Some(true)
                     } else {
                         None
                     }
                 });
                 if let Some(completed) = finished {
                     self.finish_typing(completed)?;
+                } else if self.place == Place::Typing {
+                    self.autosave_checkpoint(false)?;
                 }
                 last_tick = Instant::now();
             }
@@ -820,6 +823,7 @@ impl App {
 
     fn handle_typing_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         if key.code == KeyCode::Esc {
+            self.autosave_checkpoint(true)?;
             self.overlay = Some(Overlay::Pause);
             return Ok(false);
         }
@@ -837,8 +841,8 @@ impl App {
             });
             engine.apply(cmd);
             let state = engine.snapshot().state;
-            if state == SessionState::Completed || state == SessionState::Interrupted {
-                Some(state == SessionState::Completed)
+            if state == SessionState::Completed {
+                Some(true)
             } else {
                 None
             }
@@ -867,6 +871,7 @@ impl App {
                     .map(|s| s.typing_path.clone())
                     .unwrap_or_default();
                 if !path.is_empty() {
+                    self.reset_typing_session()?;
                     self.start_file(&path, 0)?;
                 }
                 Ok(false)
@@ -921,14 +926,15 @@ impl App {
     }
 
     fn interrupt_typing(&mut self) -> crate::Result<()> {
-        let finished = self.session.as_mut().and_then(|session| {
-            let engine = session.engine.as_mut()?;
-            engine.apply(TypingCommand::Escape);
-            Some(false)
-        });
-        if finished.is_some() {
-            self.finish_typing(false)?;
+        self.autosave_checkpoint(true)?;
+        if let Some(session) = &mut self.session {
+            session.engine = None;
+            session.result = None;
+            let progress = session.progress.clone();
+            session.tree.refresh_rows(&progress);
         }
+        self.place = Place::Tree;
+        self.overlay = None;
         Ok(())
     }
 
@@ -1098,6 +1104,7 @@ impl App {
             .id
             .ok_or_else(|| Error::Message("file body missing database id".into()))?;
         let normalized = cp.chunk.normalized.clone();
+        let checkpoint = cp.checkpoint.clone();
         let label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
         let syntax_colors = self
             .cfg
@@ -1107,19 +1114,41 @@ impl App {
             .then(|| highlight_chars(path, &normalized));
 
         let started_ms = now_millis();
-        session.engine = Some(TypingEngine::new(
-            &normalized,
-            started_ms,
-            allow_backspace,
-            auto_indent,
-            tab_width,
-        ));
+        let (engine, session_started_at, session_auto_indent) = if let Some(checkpoint) = checkpoint
+        {
+            let engine = TypingEngine::from_checkpoint(
+                &normalized,
+                started_ms,
+                &checkpoint,
+                allow_backspace,
+                tab_width,
+            )
+            .map_err(|error| {
+                Error::Message(format!("invalid typing checkpoint for {path}: {error:?}"))
+            })?;
+            (engine, checkpoint.started_at, checkpoint.auto_indent)
+        } else {
+            (
+                TypingEngine::new(
+                    &normalized,
+                    started_ms,
+                    allow_backspace,
+                    auto_indent,
+                    tab_width,
+                ),
+                Utc::now().to_rfc3339(),
+                auto_indent,
+            )
+        };
+        session.engine = Some(engine);
         self.fx = FxState::with_config(fx_intensity, fx_preset);
         session.typing_path = path.to_string();
         session.typing_chunk_label = label;
         session.typing_syntax_colors = syntax_colors;
         session.typing_chunk_id = chunk_id;
-        session.session_started_at = Utc::now().to_rfc3339();
+        session.session_started_at = session_started_at;
+        session.typing_auto_indent = session_auto_indent;
+        session.typing_checkpoint_last_saved_ms = 0;
         session.result = None;
         session.tree.repo_complete = false;
         self.place = Place::Typing;
@@ -1132,6 +1161,105 @@ impl App {
         let _ = session.single_file;
         if already_done {
             self.finish_typing(true)?;
+        }
+        Ok(())
+    }
+
+    /// Persist the current engine state, at most once per second unless forced.
+    fn autosave_checkpoint(&mut self, force: bool) -> crate::Result<()> {
+        let now_ms = now_millis();
+        let should_save = self
+            .session
+            .as_ref()
+            .map(|session| {
+                force || now_ms.saturating_sub(session.typing_checkpoint_last_saved_ms) >= 1_000
+            })
+            .unwrap_or(false);
+        if !should_save {
+            return Ok(());
+        }
+
+        let checkpoint = {
+            let Some(session) = &mut self.session else {
+                return Ok(());
+            };
+            let Some(engine) = &mut session.engine else {
+                return Ok(());
+            };
+            engine.apply(TypingCommand::Tick { now_ms });
+            let snapshot = engine.snapshot();
+            TypingCheckpoint {
+                chunk_id: session.typing_chunk_id,
+                cursor: snapshot.cursor,
+                keystrokes: snapshot.keystrokes,
+                misses: snapshot.misses,
+                elapsed_ms: snapshot.elapsed_ms,
+                started_at: session.session_started_at.clone(),
+                auto_indent: session.typing_auto_indent,
+            }
+        };
+
+        self.store.save_checkpoint(&checkpoint)?;
+        if let Some(session) = &mut self.session {
+            session.typing_checkpoint_last_saved_ms = now_ms;
+            if let Some(file) = session
+                .progress
+                .files
+                .iter_mut()
+                .find(|file| file.relative_path == session.typing_path)
+            {
+                if let Some(chunk) = file
+                    .chunks
+                    .iter_mut()
+                    .find(|chunk| chunk.id == Some(checkpoint.chunk_id))
+                {
+                    chunk.checkpoint = Some(checkpoint);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Finalize an abandoned session before starting it over from the beginning.
+    fn reset_typing_session(&mut self) -> crate::Result<()> {
+        self.autosave_checkpoint(true)?;
+        let (summary, chunk_id) = {
+            let Some(session) = &mut self.session else {
+                return Ok(());
+            };
+            let Some(engine) = session.engine.take() else {
+                return Ok(());
+            };
+            let snapshot = engine.snapshot();
+            (
+                SessionSummary {
+                    chunk_id: session.typing_chunk_id,
+                    started_at: session.session_started_at.clone(),
+                    ended_at: Utc::now().to_rfc3339(),
+                    completed: false,
+                    keystrokes: snapshot.keystrokes,
+                    misses: snapshot.misses,
+                    elapsed_ms: snapshot.elapsed_ms,
+                },
+                session.typing_chunk_id,
+            )
+        };
+        self.store.record_session(&summary)?;
+        if let Some(session) = &mut self.session {
+            if let Some(file) = session
+                .progress
+                .files
+                .iter_mut()
+                .find(|file| file.relative_path == session.typing_path)
+            {
+                if let Some(chunk) = file
+                    .chunks
+                    .iter_mut()
+                    .find(|chunk| chunk.id == Some(chunk_id))
+                {
+                    chunk.checkpoint = None;
+                }
+            }
         }
         Ok(())
     }
@@ -1171,6 +1299,7 @@ impl App {
                     .find(|c| c.id == Some(typing_chunk_id))
                 {
                     c.completion = ChunkCompletion::Complete;
+                    c.checkpoint = None;
                 }
                 file.status = file.derive_status();
             }
@@ -1342,6 +1471,8 @@ impl RepoSession {
             typing_syntax_colors: None,
             typing_chunk_id: 0,
             session_started_at: String::new(),
+            typing_auto_indent: false,
+            typing_checkpoint_last_saved_ms: 0,
             result: None,
             single_file,
             import_edges: dependency.import_edges,
@@ -1629,6 +1760,76 @@ mod tests {
                 .find(|f| f.relative_path == path)
                 .map(crate::domain::content::FileProgress::derive_status),
             Some(FileStatus::Todo)
+        );
+    }
+
+    #[test]
+    fn typing_checkpoint_resumes_and_restart_clears_it() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        std::fs::write(repo_dir.join("main.rs"), "one\ntwo\nthree").unwrap();
+        let db = dir.path().join("db.sqlite");
+        let cache = dir.path().join("cache");
+
+        let mut app = headless::open_local(repo_dir.to_str().unwrap(), &db, &cache).unwrap();
+        let path = app.progress().recommend_path().unwrap().to_string();
+        app.start_file(&path, 0).unwrap();
+        headless::press_char(&mut app, 'x').unwrap();
+        headless::press_char(&mut app, 'o').unwrap();
+        headless::press_char(&mut app, 'n').unwrap();
+        headless::press_char(&mut app, 'e').unwrap();
+        headless::press(&mut app, KeyCode::Enter).unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        headless::press_char(&mut app, 't').unwrap();
+        assert_eq!(app.progress().completed_lines(), 1);
+
+        let mut resumed = headless::open_local(repo_dir.to_str().unwrap(), &db, &cache).unwrap();
+        resumed.start_file(&path, 0).unwrap();
+        let snapshot = resumed
+            .session
+            .as_ref()
+            .and_then(|session| session.engine.as_ref())
+            .expect("resumed engine")
+            .snapshot();
+        assert_eq!(snapshot.cursor, 4);
+        assert_eq!(snapshot.keystrokes, 4);
+        assert_eq!(snapshot.misses, 1);
+
+        headless::press(&mut resumed, KeyCode::Esc).unwrap();
+        headless::press_char(&mut resumed, 'r').unwrap();
+        let restarted = resumed
+            .session
+            .as_ref()
+            .and_then(|session| session.engine.as_ref())
+            .expect("restarted engine")
+            .snapshot();
+        assert_eq!(restarted.cursor, 0);
+        assert_eq!(restarted.keystrokes, 0);
+        assert_eq!(restarted.misses, 0);
+        assert!(resumed
+            .progress()
+            .files
+            .iter()
+            .flat_map(|file| file.chunks.iter())
+            .all(|chunk| chunk.checkpoint.is_none()));
+
+        headless::press_char(&mut resumed, 'o').unwrap();
+        assert!(
+            headless::press_with(&mut resumed, KeyCode::Char('c'), KeyModifiers::CONTROL,).unwrap()
+        );
+        let mut ctrl_c_resumed =
+            headless::open_local(repo_dir.to_str().unwrap(), &db, &cache).unwrap();
+        ctrl_c_resumed.start_file(&path, 0).unwrap();
+        assert_eq!(
+            ctrl_c_resumed
+                .session
+                .as_ref()
+                .and_then(|session| session.engine.as_ref())
+                .expect("Ctrl-C checkpoint")
+                .snapshot()
+                .cursor,
+            1
         );
     }
 

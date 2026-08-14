@@ -113,6 +113,7 @@ mod tests {
                     chunks: vec![ChunkProgress {
                         chunk: chunk("src/a.rs", "1", "a1\na2\na3"),
                         completion: ChunkCompletion::Complete,
+                        checkpoint: None,
                         id: Some(1),
                     }],
                 },
@@ -124,6 +125,7 @@ mod tests {
                     chunks: vec![ChunkProgress {
                         chunk: chunk("src/b.rs", "2", "b1\nb2"),
                         completion: ChunkCompletion::Incomplete,
+                        checkpoint: None,
                         id: Some(2),
                     }],
                 },

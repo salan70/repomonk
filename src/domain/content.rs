@@ -150,8 +150,34 @@ pub struct FileProgress {
 pub struct ChunkProgress {
     pub chunk: Chunk,
     pub completion: ChunkCompletion,
+    pub checkpoint: Option<TypingCheckpoint>,
     /// Database id when known.
     pub id: Option<i64>,
+}
+
+/// The latest durable state of an in-progress typing session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypingCheckpoint {
+    pub chunk_id: i64,
+    /// Character offset into the normalized body, including auto-indent.
+    pub cursor: usize,
+    pub keystrokes: u32,
+    pub misses: u32,
+    /// Elapsed time while the typing session was active, excluding suspension.
+    pub elapsed_ms: u64,
+    /// Original session start timestamp, retained across suspensions.
+    pub started_at: String,
+    /// Auto-indent behavior used when this session started.
+    pub auto_indent: bool,
+}
+
+impl TypingCheckpoint {
+    /// Count only fully accepted normalized lines before the cursor.
+    pub fn progressed_lines(&self, normalized: &str) -> usize {
+        let total = normalized_line_count(normalized);
+        let prefix: String = normalized.chars().take(self.cursor).collect();
+        prefix.chars().filter(|ch| *ch == '\n').count().min(total)
+    }
 }
 
 impl FileProgress {
@@ -165,8 +191,16 @@ impl FileProgress {
     pub fn completed_lines(&self) -> usize {
         self.chunks
             .iter()
-            .filter(|c| c.completion == ChunkCompletion::Complete)
-            .map(|c| normalized_line_count(&c.chunk.normalized))
+            .map(|c| {
+                if c.completion == ChunkCompletion::Complete {
+                    normalized_line_count(&c.chunk.normalized)
+                } else {
+                    c.checkpoint
+                        .as_ref()
+                        .map(|checkpoint| checkpoint.progressed_lines(&c.chunk.normalized))
+                        .unwrap_or(0)
+                }
+            })
             .sum()
     }
 
@@ -355,6 +389,7 @@ mod tests {
                         hash: "h".into(),
                     },
                     completion: ChunkCompletion::Incomplete,
+                    checkpoint: None,
                     id: Some(1),
                 }]
             },
@@ -391,5 +426,24 @@ mod tests {
         );
         let empty = file("bin", true, "");
         assert_eq!(empty.toggle_override_target(), None);
+    }
+
+    #[test]
+    fn partial_checkpoint_counts_only_completed_lines() {
+        let mut f = file("a.rs", false, "one\ntwo\nthree");
+        f.chunks[0].checkpoint = Some(TypingCheckpoint {
+            chunk_id: 1,
+            cursor: 5,
+            keystrokes: 5,
+            misses: 0,
+            elapsed_ms: 10,
+            started_at: "t0".into(),
+            auto_indent: false,
+        });
+        assert_eq!(f.completed_lines(), 1);
+        assert_eq!(f.derive_status(), FileStatus::Todo);
+
+        f.chunks[0].checkpoint.as_mut().unwrap().cursor = 3;
+        assert_eq!(f.completed_lines(), 0);
     }
 }

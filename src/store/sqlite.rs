@@ -1,6 +1,6 @@
 //! SQLite persistence for repositories, chunks, and sessions.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use chrono::{NaiveDate, Utc};
@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::domain::content::{
     ChunkCompletion, ChunkProgress, FileProgress, FileStatus, ManualOverride, RepoProgress,
-    ResolvedRepository, ScanResult, SessionSummary, SkipReason,
+    ResolvedRepository, ScanResult, SessionSummary, SkipReason, TypingCheckpoint,
 };
 use crate::Error;
 
@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS sessions (
     elapsed_ms INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS typing_checkpoints (
+    chunk_id INTEGER PRIMARY KEY NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    cursor INTEGER NOT NULL,
+    keystrokes INTEGER NOT NULL,
+    misses INTEGER NOT NULL,
+    elapsed_ms INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    auto_indent INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);
 "#;
@@ -118,7 +129,10 @@ impl SqliteStore {
     fn migrate(&self) -> crate::Result<()> {
         self.conn.execute_batch(SCHEMA)?;
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')",
+            r#"
+            INSERT INTO meta(key, value) VALUES ('schema_version', '2')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            "#,
             [],
         )?;
         ensure_column(&self.conn, "repo_files", "manual_override", "TEXT")?;
@@ -166,9 +180,6 @@ impl SqliteStore {
             params![repo_id],
         )?;
 
-        let overrides = load_manual_overrides(&tx, repo_id)?;
-        let mut files_out = Vec::new();
-
         for scanned in &scan.files {
             let skip = scanned
                 .skip_reason
@@ -196,7 +207,6 @@ impl SqliteStore {
                 |row| row.get(0),
             )?;
 
-            let mut chunk_progresses = Vec::new();
             for chunk in &scanned.chunks {
                 // Reuse row with same hash on this file if present.
                 let existing: Option<i64> = tx
@@ -255,31 +265,17 @@ impl SqliteStore {
                         params![chunk_id, now],
                     )?;
                 }
-
-                chunk_progresses.push(ChunkProgress {
-                    chunk: chunk.clone(),
-                    completion: if was_done {
-                        ChunkCompletion::Complete
-                    } else {
-                        ChunkCompletion::Incomplete
-                    },
-                    id: Some(chunk_id),
-                });
             }
-
-            let mut fp = FileProgress {
-                relative_path: scanned.relative_path.clone(),
-                status: scanned.status,
-                skip_reason: scanned.skip_reason.clone(),
-                manual_override: overrides.get(&scanned.relative_path).copied(),
-                chunks: chunk_progresses,
-            };
-            fp.status = fp.derive_status();
-            files_out.push(fp);
         }
 
+        // A changed or removed normalized body must not retain its old cursor.
+        tx.execute(
+            "DELETE FROM typing_checkpoints WHERE chunk_id IN (SELECT id FROM chunks WHERE active = 0)",
+            [],
+        )?;
+
         tx.commit()?;
-        Ok((repo_id, RepoProgress { files: files_out }))
+        Ok((repo_id, self.load_progress(repo_id)?))
     }
 
     pub fn load_progress(&self, repo_id: i64) -> crate::Result<RepoProgress> {
@@ -297,9 +293,12 @@ impl SqliteStore {
             let mut chunk_stmt = self.conn.prepare(
                 r#"
                 SELECT c.id, c.content_hash, c.start_line, c.end_line, c.normalized,
-                       COALESCE(p.completed, 0)
+                       COALESCE(p.completed, 0),
+                       tc.cursor, tc.keystrokes, tc.misses, tc.elapsed_ms,
+                       tc.started_at, tc.auto_indent
                 FROM chunks c
                 LEFT JOIN chunk_progress p ON p.chunk_id = c.id
+                LEFT JOIN typing_checkpoints tc ON tc.chunk_id = c.id
                 WHERE c.file_id = ?1 AND c.active = 1
                 ORDER BY c.start_line, c.id
                 "#,
@@ -312,6 +311,28 @@ impl SqliteStore {
                     let end_line: u32 = row.get(3)?;
                     let normalized: String = row.get(4)?;
                     let completed: i64 = row.get(5)?;
+                    let cursor: Option<i64> = row.get(6)?;
+                    let checkpoint = if let Some(cursor) = cursor {
+                        Some(TypingCheckpoint {
+                            chunk_id: id,
+                            cursor: cursor.max(0) as usize,
+                            keystrokes: row
+                                .get::<_, Option<i64>>(7)?
+                                .unwrap_or(0)
+                                .clamp(0, i64::from(u32::MAX))
+                                as u32,
+                            misses: row
+                                .get::<_, Option<i64>>(8)?
+                                .unwrap_or(0)
+                                .clamp(0, i64::from(u32::MAX))
+                                as u32,
+                            elapsed_ms: row.get::<_, Option<i64>>(9)?.unwrap_or(0).max(0) as u64,
+                            started_at: row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                            auto_indent: row.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
+                        })
+                    } else {
+                        None
+                    };
                     Ok(ChunkProgress {
                         chunk: crate::domain::content::Chunk {
                             relative_path: relative_path.clone(),
@@ -325,6 +346,7 @@ impl SqliteStore {
                         } else {
                             ChunkCompletion::Incomplete
                         },
+                        checkpoint,
                         id: Some(id),
                     })
                 })?
@@ -352,7 +374,7 @@ impl SqliteStore {
         Ok(RepoProgress { files })
     }
 
-    /// Record a completed or interrupted session; mark chunk complete when finished.
+    /// Record a finalized session; mark chunk complete and clear its checkpoint when finished.
     pub fn record_session(&mut self, summary: &SessionSummary) -> crate::Result<()> {
         let tx = self.conn.transaction()?;
         save_session(&tx, summary)?;
@@ -366,7 +388,50 @@ impl SqliteStore {
                 params![summary.chunk_id, summary.ended_at],
             )?;
         }
+        tx.execute(
+            "DELETE FROM typing_checkpoints WHERE chunk_id = ?1",
+            params![summary.chunk_id],
+        )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Upsert the latest suspended typing state for a chunk.
+    pub fn save_checkpoint(&mut self, checkpoint: &TypingCheckpoint) -> crate::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            r#"
+            INSERT INTO typing_checkpoints(
+                chunk_id, cursor, keystrokes, misses, elapsed_ms, started_at, auto_indent, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(chunk_id) DO UPDATE SET
+                cursor = excluded.cursor,
+                keystrokes = excluded.keystrokes,
+                misses = excluded.misses,
+                elapsed_ms = excluded.elapsed_ms,
+                started_at = excluded.started_at,
+                auto_indent = excluded.auto_indent,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                checkpoint.chunk_id,
+                checkpoint.cursor as i64,
+                checkpoint.keystrokes,
+                checkpoint.misses,
+                checkpoint.elapsed_ms as i64,
+                &checkpoint.started_at,
+                if checkpoint.auto_indent { 1 } else { 0 },
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_checkpoint(&mut self, chunk_id: i64) -> crate::Result<()> {
+        self.conn.execute(
+            "DELETE FROM typing_checkpoints WHERE chunk_id = ?1",
+            params![chunk_id],
+        )?;
         Ok(())
     }
 
@@ -615,26 +680,6 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> cr
     Ok(())
 }
 
-fn load_manual_overrides(
-    tx: &Transaction<'_>,
-    repo_id: i64,
-) -> crate::Result<HashMap<String, ManualOverride>> {
-    let mut stmt = tx.prepare(
-        "SELECT relative_path, manual_override FROM repo_files WHERE repository_id = ?1",
-    )?;
-    let rows = stmt.query_map(params![repo_id], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-    })?;
-    let mut out = HashMap::new();
-    for row in rows {
-        let (path, raw) = row?;
-        if let Some(value) = raw.as_deref().and_then(ManualOverride::parse) {
-            out.insert(path, value);
-        }
-    }
-    Ok(out)
-}
-
 fn parse_skip_reason(raw: &str) -> SkipReason {
     if raw == "excluded directory" {
         SkipReason::VcsOrDependencyDir
@@ -844,6 +889,97 @@ mod tests {
 
         let loaded = store.load_progress(repo_id).unwrap();
         assert_eq!(loaded.files[0].derive_status(), FileStatus::Done);
+    }
+
+    #[test]
+    fn checkpoint_round_trips_and_is_cleared_on_completion_or_changed_refresh() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let repo = ResolvedRepository {
+            identity: "local:/tmp/checkpoint".into(),
+            display_name: "checkpoint".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/checkpoint".into(),
+            input: "/tmp/checkpoint".into(),
+        };
+        let body = "one\ntwo\nthree";
+        let scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("main.rs", body)],
+            }],
+            import_edges: Vec::new(),
+        };
+        let (repo_id, progress) = store.sync_scan(&repo, &scan, true).unwrap();
+        let chunk_id = progress.files[0].chunks[0].id.unwrap();
+        store
+            .save_checkpoint(&TypingCheckpoint {
+                chunk_id,
+                cursor: 4,
+                keystrokes: 4,
+                misses: 1,
+                elapsed_ms: 2_000,
+                started_at: "t0".into(),
+                auto_indent: true,
+            })
+            .unwrap();
+
+        let loaded = store.load_progress(repo_id).unwrap();
+        let checkpoint = loaded.files[0].chunks[0]
+            .checkpoint
+            .as_ref()
+            .expect("checkpoint persisted");
+        assert_eq!(checkpoint.cursor, 4);
+        assert_eq!(loaded.completed_lines(), 1);
+        let recent = store.list_recent_repos(1).unwrap();
+        assert_eq!(recent[0].done_lines, 1);
+
+        let (_, same_body) = store.sync_scan(&repo, &scan, true).unwrap();
+        assert!(same_body.files[0].chunks[0].checkpoint.is_some());
+
+        let changed_scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("main.rs", "changed")],
+            }],
+            import_edges: Vec::new(),
+        };
+        let (_, changed) = store.sync_scan(&repo, &changed_scan, true).unwrap();
+        assert!(changed.files[0].chunks[0].checkpoint.is_none());
+
+        let changed_id = changed.files[0].chunks[0].id.unwrap();
+        store
+            .save_checkpoint(&TypingCheckpoint {
+                chunk_id: changed_id,
+                cursor: 1,
+                keystrokes: 1,
+                misses: 0,
+                elapsed_ms: 1,
+                started_at: "t0".into(),
+                auto_indent: false,
+            })
+            .unwrap();
+        store
+            .record_session(&SessionSummary {
+                chunk_id: changed_id,
+                started_at: "t0".into(),
+                ended_at: "t1".into(),
+                completed: true,
+                keystrokes: 7,
+                misses: 0,
+                elapsed_ms: 100,
+            })
+            .unwrap();
+        assert!(store
+            .load_progress(repo_id)
+            .unwrap()
+            .files
+            .iter()
+            .flat_map(|file| file.chunks.iter())
+            .all(|chunk| chunk.checkpoint.is_none()));
     }
 
     #[test]

@@ -623,6 +623,7 @@ mod tests {
                     hash: path.into(),
                 },
                 completion: ChunkCompletion::Incomplete,
+                checkpoint: None,
                 id: Some(1),
             }],
         };

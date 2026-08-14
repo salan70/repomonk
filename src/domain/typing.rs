@@ -1,6 +1,6 @@
 //! I/O-free typing state machine.
 
-use crate::domain::content::TypingMetrics;
+use crate::domain::content::{TypingCheckpoint, TypingMetrics};
 
 /// Normalized input from the terminal layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,12 @@ pub struct TypingSnapshot {
     pub started_at_ms: u64,
     /// Indices that were auto-inserted (indent); excluded from keystroke counts.
     pub auto_inserted: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypingRestoreError {
+    CursorOutOfBounds { cursor: usize, target_len: usize },
+    CursorInsideAutoIndent { cursor: usize },
 }
 
 /// Forced-correction typing engine with auto-indent.
@@ -95,6 +101,68 @@ impl TypingEngine {
             engine.state = SessionState::Completed;
         }
         engine
+    }
+
+    /// Restore a suspended session without counting time spent outside the app.
+    pub fn from_checkpoint(
+        normalized: &str,
+        now_ms: u64,
+        checkpoint: &TypingCheckpoint,
+        allow_backspace: bool,
+        tab_width: usize,
+    ) -> Result<Self, TypingRestoreError> {
+        let target: Vec<char> = normalized.chars().collect();
+        if checkpoint.cursor > target.len() {
+            return Err(TypingRestoreError::CursorOutOfBounds {
+                cursor: checkpoint.cursor,
+                target_len: target.len(),
+            });
+        }
+
+        let mut engine = Self {
+            target,
+            auto_inserted: vec![false; normalized.chars().count()],
+            cursor: 0,
+            keystrokes: checkpoint.keystrokes,
+            misses: checkpoint.misses,
+            state: SessionState::Active,
+            miss_until_ms: None,
+            started_at_ms: now_ms.saturating_sub(checkpoint.elapsed_ms),
+            now_ms,
+            allow_backspace,
+            auto_indent: checkpoint.auto_indent,
+            tab_width: tab_width.max(1),
+        };
+
+        while engine.cursor < checkpoint.cursor {
+            let before = engine.cursor;
+            engine.apply_auto_indent();
+            if engine.cursor > checkpoint.cursor {
+                return Err(TypingRestoreError::CursorInsideAutoIndent {
+                    cursor: checkpoint.cursor,
+                });
+            }
+            if engine.cursor == checkpoint.cursor {
+                break;
+            }
+            engine.cursor += 1;
+            if engine.cursor == before {
+                return Err(TypingRestoreError::CursorOutOfBounds {
+                    cursor: checkpoint.cursor,
+                    target_len: engine.target.len(),
+                });
+            }
+        }
+        engine.apply_auto_indent();
+        if engine.cursor > checkpoint.cursor {
+            return Err(TypingRestoreError::CursorInsideAutoIndent {
+                cursor: checkpoint.cursor,
+            });
+        }
+        if engine.cursor >= engine.target.len() {
+            engine.state = SessionState::Completed;
+        }
+        Ok(engine)
     }
 
     pub fn snapshot(&self) -> TypingSnapshot {
@@ -343,5 +411,52 @@ mod tests {
         let e = TypingEngine::new("  ab", 0, true, false, 4);
         assert_eq!(e.snapshot().cursor, 0);
         assert_eq!(e.snapshot().expected, Some(' '));
+    }
+
+    #[test]
+    fn checkpoint_restores_cursor_metrics_and_auto_indent() {
+        let mut e = TypingEngine::new("a\n  bc", 0, true, true, 4);
+        e.apply(TypingCommand::Char('a'));
+        e.apply(TypingCommand::Enter);
+        e.apply(TypingCommand::Char('b'));
+        e.apply(TypingCommand::Tick { now_ms: 1_000 });
+        let snapshot = e.snapshot();
+        let checkpoint = TypingCheckpoint {
+            chunk_id: 7,
+            cursor: snapshot.cursor,
+            keystrokes: snapshot.keystrokes,
+            misses: snapshot.misses,
+            elapsed_ms: snapshot.elapsed_ms,
+            started_at: "t0".into(),
+            auto_indent: true,
+        };
+
+        let restored = TypingEngine::from_checkpoint("a\n  bc", 5_000, &checkpoint, true, 4)
+            .expect("valid checkpoint");
+        let restored_snapshot = restored.snapshot();
+        assert_eq!(restored_snapshot.cursor, snapshot.cursor);
+        assert_eq!(restored_snapshot.expected, snapshot.expected);
+        assert_eq!(restored_snapshot.keystrokes, snapshot.keystrokes);
+        assert_eq!(restored_snapshot.misses, snapshot.misses);
+        assert_eq!(restored_snapshot.elapsed_ms, snapshot.elapsed_ms);
+        assert!(restored_snapshot.auto_inserted.contains(&2));
+        assert!(restored_snapshot.auto_inserted.contains(&3));
+    }
+
+    #[test]
+    fn checkpoint_rejects_cursor_inside_auto_indent() {
+        let checkpoint = TypingCheckpoint {
+            chunk_id: 1,
+            cursor: 1,
+            keystrokes: 0,
+            misses: 0,
+            elapsed_ms: 0,
+            started_at: "t0".into(),
+            auto_indent: true,
+        };
+        assert!(matches!(
+            TypingEngine::from_checkpoint("  x", 0, &checkpoint, true, 4),
+            Err(TypingRestoreError::CursorInsideAutoIndent { .. })
+        ));
     }
 }
