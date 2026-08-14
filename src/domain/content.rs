@@ -52,6 +52,21 @@ impl SkipReason {
             Self::IoError(msg) => format!("read error: {msg}"),
         }
     }
+
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::TestFile => "test",
+            Self::GeneratedOrLockFile => "generated",
+            Self::ConfigFile => "config",
+            Self::Binary => "binary",
+            Self::LineTooLong { .. } => "too long",
+            Self::FileTooLarge { .. } => "too large",
+            Self::FileTypeDisabled => "type off",
+            Self::NoChunks => "empty",
+            Self::VcsOrDependencyDir => "excluded dir",
+            Self::IoError(_) => "read error",
+        }
+    }
 }
 
 /// Effective file status derived from chunks (and skip).
@@ -259,6 +274,17 @@ impl FileProgress {
         self.skip_reason.as_ref().map(|r| r.as_str())
     }
 
+    /// Compact skip label for the tree row (`— test`). Manual skip is `manual`.
+    pub fn short_skip_reason(&self) -> Option<&'static str> {
+        if self.derive_status() != FileStatus::Skipped {
+            return None;
+        }
+        if self.manual_override == Some(ManualOverride::Skip) {
+            return Some("manual");
+        }
+        self.skip_reason.as_ref().map(SkipReason::short_label)
+    }
+
     /// `x` toggle: skip a typeable file, or include a skipped file that has a body.
     pub fn toggle_override_target(&self) -> Option<ManualOverride> {
         match self.derive_status() {
@@ -417,6 +443,7 @@ mod tests {
         f.manual_override = Some(ManualOverride::Skip);
         assert_eq!(f.derive_status(), FileStatus::Skipped);
         assert_eq!(f.display_skip_reason().as_deref(), Some("manually skipped"));
+        assert_eq!(f.short_skip_reason(), Some("manual"));
     }
 
     #[test]

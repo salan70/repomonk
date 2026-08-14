@@ -25,10 +25,14 @@ pub struct TreeRow {
     pub name: String,
     /// `(completed, total)` normalized line counts; `None` for skipped files.
     pub progress: Option<(usize, usize)>,
+    /// For directories: `(done_files, typeable_files)`. `None` for files.
+    pub file_counts: Option<(usize, usize)>,
     /// File status; `None` for directories.
     pub status: Option<FileStatus>,
     /// Human-readable skip reason for skipped files.
     pub skip_reason: Option<String>,
+    /// Compact skip label shown in the row (`— test`).
+    pub skip_short: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +56,8 @@ pub struct TreeView {
     pub visible_rows: usize,
     /// Shown after Result Enter when the repository is fully done.
     pub repo_complete: bool,
+    /// Count of skipped files currently hidden by `hide_skipped`.
+    pub excluded: usize,
     /// One-line status/error banner (e.g. from the File types overlay), cleared on next input.
     pub message: Option<String>,
     /// Paths whose file type is set to `Hidden`: excluded from the tree unconditionally,
@@ -101,6 +107,7 @@ impl TreeView {
             filter_editing: false,
             visible_rows: 1,
             repo_complete: false,
+            excluded: excluded_count(progress, hide_skipped, &hidden_paths),
             message: None,
             hidden_paths,
         };
@@ -115,6 +122,7 @@ impl TreeView {
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
         self.overall = overall_progress(progress);
+        self.excluded = excluded_count(progress, self.hide_skipped, &self.hidden_paths);
         let prev_path = self.selected_path();
         self.rows = visible_rows(
             progress,
@@ -304,6 +312,23 @@ impl TreeView {
     }
 }
 
+fn excluded_count(
+    progress: &RepoProgress,
+    hide_skipped: bool,
+    hidden_paths: &std::collections::HashSet<String>,
+) -> usize {
+    if !hide_skipped {
+        return 0;
+    }
+    progress
+        .files
+        .iter()
+        .filter(|f| {
+            f.derive_status() == FileStatus::Skipped && !hidden_paths.contains(&f.relative_path)
+        })
+        .count()
+}
+
 fn overall_progress(progress: &RepoProgress) -> (usize, usize) {
     let root = directory_progress(progress, "");
     (root.completed_lines, root.total_lines)
@@ -368,17 +393,23 @@ fn flatten(
                         depth: i,
                         name: (*part).to_string(),
                         progress: Some((dprog.completed_lines, dprog.total_lines)),
+                        file_counts: Some((dprog.done_files, dprog.done_files + dprog.todo_files)),
                         status: None,
                         skip_reason: None,
+                        skip_short: None,
                     });
                     emitted_dirs.insert(acc.clone());
                 }
             } else {
                 let status = f.derive_status();
-                let (progress_counts, skip_reason) = if status == FileStatus::Skipped {
-                    (None, f.display_skip_reason())
+                let (progress_counts, skip_reason, skip_short) = if status == FileStatus::Skipped {
+                    (
+                        None,
+                        f.display_skip_reason(),
+                        f.short_skip_reason().map(str::to_string),
+                    )
                 } else {
-                    (Some((f.completed_lines(), f.total_lines())), None)
+                    (Some((f.completed_lines(), f.total_lines())), None, None)
                 };
                 rows.push(TreeRow {
                     kind: TreeRowKind::File {
@@ -387,8 +418,10 @@ fn flatten(
                     depth: i,
                     name: (*part).to_string(),
                     progress: progress_counts,
+                    file_counts: None,
                     status: Some(status),
                     skip_reason,
+                    skip_short,
                 });
             }
         }
@@ -428,6 +461,7 @@ fn compress_once(rows: &[TreeRow]) -> Vec<TreeRow> {
                         path: child_path.clone(),
                     };
                     compressed.progress = rows[child_idx].progress;
+                    compressed.file_counts = rows[child_idx].file_counts;
                     out.push(compressed);
                     for desc in rows.iter().take(end).skip(child_idx + 1) {
                         let mut lifted = desc.clone();
@@ -535,22 +569,13 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     frame.render_widget(block, area);
 
     let show_flow_bar = view.flow.is_some() && area.height >= 12;
-    let filter_line = view.filter_editing || !view.filter.is_empty();
-    let origin = if filter_line || view.message.is_some() {
-        None
-    } else {
-        selected_origin(view)
-    };
-    let info_line = filter_line || view.message.is_some() || origin.is_some();
 
     let mut constraints = vec![Constraint::Length(1)];
     if show_flow_bar {
         constraints.push(Constraint::Length(1));
     }
-    if info_line {
-        constraints.push(Constraint::Length(1));
-    }
     constraints.push(Constraint::Min(1));
+    constraints.push(Constraint::Length(1));
     constraints.push(Constraint::Length(1));
     let panes = Layout::default()
         .direction(Direction::Vertical)
@@ -567,15 +592,9 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     } else {
         None
     };
-    let info_pane = if info_line {
-        let pane = panes[pane_idx];
-        pane_idx += 1;
-        Some(pane)
-    } else {
-        None
-    };
     let list_pane = panes[pane_idx];
-    let footer_pane = panes[pane_idx + 1];
+    let info_pane = panes[pane_idx + 1];
+    let footer_pane = panes[pane_idx + 2];
 
     // Header: repository-wide progress gauge.
     let (completed, total) = view.overall;
@@ -616,40 +635,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         );
     }
 
-    if let Some(pane) = info_pane {
-        if filter_line {
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" /", Style::default().fg(theme::CYAN)),
-                    Span::styled(
-                        view.filter.clone(),
-                        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        if view.filter_editing { "▌" } else { "" },
-                        Style::default().fg(theme::CYAN),
-                    ),
-                ])),
-                pane,
-            );
-        } else if let Some(message) = &view.message {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {message}"),
-                    Style::default().fg(theme::MUTED),
-                ))),
-                pane,
-            );
-        } else if let Some(origin) = origin {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {origin}"),
-                    Style::default().fg(theme::MUTED),
-                ))),
-                pane,
-            );
-        }
-    }
+    frame.render_widget(Paragraph::new(info_line(view, info_pane.width)), info_pane);
 
     // Body: tree rows.
     let items: Vec<ListItem> = view
@@ -682,6 +668,79 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer_pane);
 }
 
+fn info_line(view: &TreeView, width: u16) -> Line<'static> {
+    if view.filter_editing || !view.filter.is_empty() {
+        return Line::from(vec![
+            Span::styled(" /", Style::default().fg(theme::CYAN)),
+            Span::styled(
+                view.filter.clone(),
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if view.filter_editing { "▌" } else { "" },
+                Style::default().fg(theme::CYAN),
+            ),
+        ]);
+    }
+    if let Some(message) = &view.message {
+        return Line::from(Span::styled(
+            format!(" {message}"),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    let left = selected_detail(view);
+    let right = if view.excluded > 0 {
+        format!("{} excluded · t", view.excluded)
+    } else {
+        String::new()
+    };
+    let pad = (width as usize).saturating_sub(left.chars().count() + right.chars().count() + 2);
+    Line::from(vec![
+        Span::styled(format!(" {left}"), Style::default().fg(theme::MUTED)),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(right, Style::default().fg(theme::MUTED)),
+    ])
+}
+
+fn selected_detail(view: &TreeView) -> String {
+    let Some(row) = view.rows.get(view.selected) else {
+        return String::new();
+    };
+    match &row.kind {
+        TreeRowKind::File { path } => {
+            let mut text = if let Some(reason) = &row.skip_reason {
+                format!("{path} · {reason}")
+            } else if let Some((done, total)) = row.progress {
+                format!("{path} · {total} lines · {done} done")
+            } else {
+                path.clone()
+            };
+            if let Some(origin) = selected_origin(view) {
+                text.push_str(" · ");
+                text.push_str(&origin);
+            }
+            text
+        }
+        TreeRowKind::Dir { path } => {
+            let (done, total) = row.file_counts.unwrap_or((0, 0));
+            format!("{path}/ · {total} files · {done} done")
+        }
+    }
+}
+
+fn mini_bar(ratio: f64, width: usize) -> String {
+    let filled = ((ratio.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
+    let mut s = String::new();
+    for i in 0..width {
+        if i < filled {
+            s.push('█');
+        } else {
+            s.push('░');
+        }
+    }
+    s
+}
+
 fn selected_origin(view: &TreeView) -> Option<String> {
     let flow = view.flow.as_ref()?;
     let path = view.selected_file_path()?;
@@ -699,7 +758,8 @@ fn selected_origin(view: &TreeView) -> Option<String> {
 
 fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
     let mut spans: Vec<Span> = Vec::new();
-    spans.push(Span::raw(" ".repeat(1 + row.depth * 2)));
+    let indent = 1 + row.depth * 2;
+    spans.push(Span::raw(" ".repeat(indent)));
 
     match &row.kind {
         TreeRowKind::Dir { path } => {
@@ -712,21 +772,30 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
                 arrow.to_string(),
                 Style::default().fg(theme::MUTED),
             ));
-            let suffix = row
-                .progress
-                .map(|(done, total)| format!("  [{done}/{total} lines]"))
-                .unwrap_or_default();
-            let used = 1 + row.depth * 2 + arrow.chars().count() + suffix.chars().count() + 1;
+            let bar = match row.progress {
+                Some((done, total)) if total > 0 => mini_bar(done as f64 / total as f64, 8),
+                Some(_) => mini_bar(0.0, 8),
+                None => String::new(),
+            };
+            let used = indent + arrow.chars().count() + 1 + bar.chars().count() + 1;
             let budget = (width as usize).saturating_sub(used);
             let name = elide_dir_name(&row.name, budget);
+            let name_text = format!("{name}/");
             spans.push(Span::styled(
-                format!("{name}/"),
+                name_text.clone(),
                 Style::default()
                     .fg(theme::BLUE)
                     .add_modifier(Modifier::BOLD),
             ));
-            if !suffix.is_empty() {
-                spans.push(Span::styled(suffix, Style::default().fg(theme::MUTED)));
+            if !bar.is_empty() {
+                let pad = (width as usize).saturating_sub(
+                    indent
+                        + arrow.chars().count()
+                        + name_text.chars().count()
+                        + bar.chars().count(),
+                );
+                spans.push(Span::raw(" ".repeat(pad.max(1))));
+                spans.push(Span::styled(bar, Style::default().fg(theme::MUTED)));
             }
         }
         TreeRowKind::File { path } => {
@@ -763,22 +832,12 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
                 row.name.clone(),
                 Style::default().fg(name_color),
             ));
-            if let Some(reason) = &row.skip_reason {
+            if let Some(short) = &row.skip_short {
                 spans.push(Span::styled(
-                    format!("  ({reason})"),
+                    format!(" — {short}"),
                     Style::default()
                         .fg(theme::MUTED)
                         .add_modifier(Modifier::ITALIC),
-                ));
-            } else if let Some((done, total)) = row.progress {
-                let color = if status == FileStatus::Done {
-                    theme::GREEN
-                } else {
-                    theme::MUTED
-                };
-                spans.push(Span::styled(
-                    format!("  [{done}/{total}]"),
-                    Style::default().fg(color),
                 ));
             }
             if view.recommend.as_deref() == Some(path.as_str()) {
@@ -875,6 +934,7 @@ mod tests {
         assert!(names.contains(&"src"));
         assert!(names.contains(&"a.rs"));
         assert!(names.contains(&"lib.rs"));
+        assert_eq!(tree.excluded, 2);
     }
 
     #[test]
@@ -1021,5 +1081,35 @@ mod tests {
             "swift-scanner/…/SpecLinkSwiftScanner"
         );
         assert_eq!(elide_dir_name("src/cli", 20), "src/cli");
+    }
+
+    #[test]
+    fn detail_row_summarizes_selected_file_and_dir() {
+        let progress = progress();
+        let mut tree = tree_view(&progress, false);
+        assert_eq!(selected_detail(&tree), "src/a.rs · 1 lines · 0 done");
+        tree.move_by(-1);
+        assert_eq!(selected_detail(&tree), "src/ · 2 files · 0 done");
+    }
+
+    #[test]
+    fn skipped_row_uses_short_label() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        let mut tree = tree_view(&progress, false);
+        tree.collapsed.remove("tests");
+        tree.refresh_rows(&progress);
+        let skipped = tree
+            .rows
+            .iter()
+            .find(|r| r.name == "foo.rs")
+            .expect("skipped row");
+        assert_eq!(skipped.skip_short.as_deref(), Some("test"));
+        assert_eq!(
+            skipped.skip_reason.as_deref(),
+            Some("test file (include_tests=false)")
+        );
     }
 }
