@@ -60,25 +60,6 @@ pub struct TreeView {
 }
 
 impl TreeView {
-    pub fn from_progress(repo_name: &str, progress: &RepoProgress, hide_skipped: bool) -> Self {
-        Self::from_progress_with_order(repo_name, progress, hide_skipped, None)
-    }
-
-    pub fn from_progress_with_order(
-        repo_name: &str,
-        progress: &RepoProgress,
-        hide_skipped: bool,
-        flow: Option<FlowOrder>,
-    ) -> Self {
-        Self::from_progress_full(
-            repo_name,
-            progress,
-            hide_skipped,
-            flow,
-            std::collections::HashSet::new(),
-        )
-    }
-
     pub fn from_progress_full(
         repo_name: &str,
         progress: &RepoProgress,
@@ -90,19 +71,34 @@ impl TreeView {
         let flow_counts = flow
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
-        let rows = flatten(
+        let expanded = flatten(
             progress,
             &std::collections::HashSet::new(),
             hide_skipped,
             &hidden_paths,
             "",
         );
-        Self {
+        let mut collapsed: std::collections::HashSet<String> = expanded
+            .iter()
+            .filter_map(|row| match &row.kind {
+                TreeRowKind::Dir { path } => Some(path.clone()),
+                TreeRowKind::File { .. } => None,
+            })
+            .collect();
+        if let Some(path) = &recommend {
+            let mut current = path.clone();
+            while let Some(parent) = parent_path(&current) {
+                collapsed.remove(&parent);
+                current = parent;
+            }
+        }
+        let rows = flatten(progress, &collapsed, hide_skipped, &hidden_paths, "");
+        let mut view = Self {
             rows,
             selected: 0,
             recommend,
             title: repo_name.to_string(),
-            collapsed: std::collections::HashSet::new(),
+            collapsed,
             flow,
             flow_counts,
             overall: overall_progress(progress),
@@ -113,7 +109,9 @@ impl TreeView {
             repo_complete: false,
             message: None,
             hidden_paths,
-        }
+        };
+        view.jump_recommend();
+        view
     }
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
@@ -731,8 +729,8 @@ mod tests {
         Chunk, ChunkCompletion, ChunkProgress, FileProgress, FileStatus, RepoProgress, SkipReason,
     };
 
-    fn progress() -> RepoProgress {
-        let file = |path: &str, body: &str| FileProgress {
+    fn file(path: &str, body: &str) -> FileProgress {
+        FileProgress {
             relative_path: path.into(),
             status: FileStatus::Todo,
             skip_reason: None,
@@ -749,7 +747,10 @@ mod tests {
                 checkpoint: None,
                 id: Some(1),
             }],
-        };
+        }
+    }
+
+    fn progress() -> RepoProgress {
         RepoProgress {
             files: vec![
                 file("src/a.rs", "a"),
@@ -757,6 +758,16 @@ mod tests {
                 file("lib.rs", "l"),
             ],
         }
+    }
+
+    fn tree_view(progress: &RepoProgress, hide_skipped: bool) -> TreeView {
+        TreeView::from_progress_full(
+            "demo",
+            progress,
+            hide_skipped,
+            None,
+            std::collections::HashSet::new(),
+        )
     }
 
     fn skipped_file(path: &str, reason: SkipReason) -> FileProgress {
@@ -778,7 +789,7 @@ mod tests {
         progress
             .files
             .push(skipped_file("docs/readme.md", SkipReason::ConfigFile));
-        let tree = TreeView::from_progress("demo", &progress, true);
+        let tree = tree_view(&progress, true);
         let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
         assert!(!names.contains(&"tests"));
         assert!(!names.contains(&"foo.rs"));
@@ -792,7 +803,7 @@ mod tests {
     #[test]
     fn filter_keeps_matching_file_and_parent() {
         let progress = progress();
-        let mut tree = TreeView::from_progress("demo", &progress, false);
+        let mut tree = tree_view(&progress, false);
         tree.filter = "b.rs".into();
         tree.refresh_rows(&progress);
         let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
@@ -805,7 +816,7 @@ mod tests {
     #[test]
     fn jump_recommend_selects_first_todo() {
         let progress = progress();
-        let mut tree = TreeView::from_progress("demo", &progress, false);
+        let mut tree = tree_view(&progress, false);
         tree.selected = tree.rows.len() - 1;
         assert!(tree.jump_recommend());
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
@@ -815,7 +826,7 @@ mod tests {
     fn vertical_movement_selects_directories_and_enabled_files() {
         let mut progress = progress();
         progress.files[1].manual_override = Some(crate::domain::content::ManualOverride::Skip);
-        let mut tree = TreeView::from_progress("demo", &progress, false);
+        let mut tree = tree_view(&progress, false);
 
         assert!(tree.jump_to_path("src/a.rs"));
         tree.move_by(-1);
@@ -837,12 +848,28 @@ mod tests {
     #[test]
     fn move_by_stops_on_directories() {
         let progress = progress();
-        let mut tree = TreeView::from_progress("demo", &progress, false);
-        assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
-        tree.move_by(1);
+        let mut tree = tree_view(&progress, false);
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
         tree.move_by(-1);
         assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
+        tree.move_by(1);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn collapsed_by_default_expands_path_to_recommend() {
+        let mut progress = progress();
+        progress.files.push(file("other/x.rs", "x"));
+        let tree = tree_view(&progress, false);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"src"));
+        assert!(names.contains(&"a.rs"));
+        assert!(names.contains(&"b.rs"));
+        assert!(names.contains(&"other"));
+        assert!(!names.contains(&"x.rs"));
+        assert!(tree.collapsed.contains("other"));
+        assert!(!tree.collapsed.contains("src"));
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
     }
 
     #[test]
