@@ -4,17 +4,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::domain::content::{FileStatus, ScanResult, ScannedFile, SkipReason};
+use crate::domain::file_type::{file_type_key, FileTypePrefs};
 use crate::scan::deps::collect_edges;
 use crate::scan::extract::{extract_chunks, ExtractOptions};
 
 /// Limits used for automatic exclusion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkOptions {
     pub max_line_cols: usize,
     pub max_file_lines: usize,
     pub include_tests: bool,
     pub include_configs: bool,
     pub extract: ExtractOptions,
+    pub file_types: FileTypePrefs,
 }
 
 impl Default for WalkOptions {
@@ -25,6 +27,7 @@ impl Default for WalkOptions {
             include_tests: false,
             include_configs: false,
             extract: ExtractOptions::default(),
+            file_types: FileTypePrefs::default(),
         }
     }
 }
@@ -210,11 +213,18 @@ fn classify_file(root: &Path, path: &Path, opts: &WalkOptions) -> ScannedFile {
         return skipped(relative, SkipReason::VcsOrDependencyDir);
     }
 
+    let type_key = file_type_key(&relative);
+    let type_enabled = opts.file_types.get(&type_key);
+
+    if type_enabled == Some(false) {
+        return skipped(relative, SkipReason::FileTypeDisabled);
+    }
+
     if !opts.include_tests && is_test_path(&relative, &name) {
         return skipped(relative, SkipReason::TestFile);
     }
 
-    if !opts.include_configs && is_config_path(&relative, &name) {
+    if type_enabled != Some(true) && !opts.include_configs && is_config_path(&relative, &name) {
         return skipped(relative, SkipReason::ConfigFile);
     }
 
@@ -541,5 +551,58 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    #[test]
+    fn file_type_disabled_wins_over_default_todo() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("src.rs"), source_body()).unwrap();
+
+        let mut prefs = std::collections::HashMap::new();
+        prefs.insert(".rs".to_string(), false);
+        let opts = WalkOptions {
+            file_types: crate::domain::file_type::FileTypePrefs::new(prefs),
+            ..WalkOptions::default()
+        };
+        let result = scan_repository(root, opts).unwrap();
+        let file = result
+            .files
+            .iter()
+            .find(|f| f.relative_path == "src.rs")
+            .unwrap();
+        assert_eq!(file.status, FileStatus::Skipped);
+        assert_eq!(file.skip_reason, Some(SkipReason::FileTypeDisabled));
+    }
+
+    #[test]
+    fn file_type_enabled_overrides_config_but_not_test_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("README.md"), "documentation\n").unwrap();
+        fs::create_dir(root.join("tests")).unwrap();
+        fs::write(root.join("tests/README.md"), "documentation\n").unwrap();
+
+        let mut prefs = std::collections::HashMap::new();
+        prefs.insert(".md".to_string(), true);
+        let opts = WalkOptions {
+            file_types: crate::domain::file_type::FileTypePrefs::new(prefs),
+            ..WalkOptions::default()
+        };
+        let result = scan_repository(root, opts).unwrap();
+        let readme = result
+            .files
+            .iter()
+            .find(|f| f.relative_path == "README.md")
+            .unwrap();
+        assert_eq!(readme.status, FileStatus::Todo);
+
+        let test_readme = result
+            .files
+            .iter()
+            .find(|f| f.relative_path == "tests/README.md")
+            .unwrap();
+        assert_eq!(test_readme.status, FileStatus::Skipped);
+        assert_eq!(test_readme.skip_reason, Some(SkipReason::TestFile));
     }
 }

@@ -1,3 +1,4 @@
+pub mod file_types;
 pub mod fx;
 pub mod help;
 pub mod highlight;

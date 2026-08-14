@@ -14,11 +14,13 @@ use crate::domain::content::{
     TypingCheckpoint, TypingMetrics,
 };
 use crate::domain::dependency::{order_files, uses_dependency_mode};
+use crate::domain::file_type::FileTypePrefs;
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
 use crate::scan::extract::ExtractOptions;
 use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
 use crate::store::SqliteStore;
+use crate::ui::file_types::{draw_file_types, FileTypesView};
 use crate::ui::fx::FxState;
 use crate::ui::help::{draw_help, HelpContext};
 use crate::ui::highlight::highlight_chars;
@@ -48,6 +50,7 @@ enum Overlay {
     Settings,
     Stats,
     Pause,
+    FileTypes,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +91,9 @@ struct RepoSession {
     dependency_mode: bool,
     entry_override: Option<String>,
     ordered_paths: Option<Vec<String>>,
+    /// True right after `load_session` when saved file-type prefs were empty
+    /// (i.e. this repository has never had the File types overlay closed on it).
+    show_file_types_overlay: bool,
 }
 
 struct DependencySettings {
@@ -107,6 +113,7 @@ pub struct App {
     search: SearchState,
     stats: Option<StatsView>,
     settings: SettingsView,
+    file_types: Option<FileTypesView>,
     session: Option<RepoSession>,
     fx: FxState,
     splash_started: Option<Instant>,
@@ -118,7 +125,8 @@ impl App {
         let mut store = SqliteStore::open(&cfg.db_path)?;
         let session = load_session(input, cfg, &mut store)?;
         let home = load_home_view(&store)?;
-        Ok(Self {
+        let show_file_types = session.show_file_types_overlay;
+        let mut app = Self {
             cfg: cfg.clone(),
             store,
             place: Place::Tree,
@@ -129,10 +137,15 @@ impl App {
             search: SearchState::default(),
             stats: None,
             settings: SettingsView::new(),
+            file_types: None,
             session: Some(session),
             fx: FxState::with_config(cfg.user.fx.intensity, cfg.user.fx.preset),
             splash_started: None,
-        })
+        };
+        if show_file_types {
+            app.open_file_types();
+        }
+        Ok(app)
     }
 
     /// Start on the Home screen with no repository loaded.
@@ -150,6 +163,7 @@ impl App {
             search: SearchState::default(),
             stats: None,
             settings: SettingsView::new(),
+            file_types: None,
             session: None,
             fx: FxState::with_config(cfg.user.fx.intensity, cfg.user.fx.preset),
             splash_started: None,
@@ -265,6 +279,11 @@ impl App {
                                 }
                             }
                             Some(Overlay::Pause) => draw_pause(frame, area),
+                            Some(Overlay::FileTypes) => {
+                                if let Some(view) = &self.file_types {
+                                    draw_file_types(frame, area, view);
+                                }
+                            }
                             None => {}
                         }
                         if self.help {
@@ -367,6 +386,7 @@ impl App {
             Some(Overlay::Search) => return self.handle_search_key(key),
             Some(Overlay::Settings) => return self.handle_settings_key(key),
             Some(Overlay::Stats) => return self.handle_stats_key(key),
+            Some(Overlay::FileTypes) => return self.handle_file_types_key(key),
             Some(Overlay::Pause) | None => {}
         }
 
@@ -407,6 +427,7 @@ impl App {
                     Overlay::Settings => HelpContext::Settings,
                     Overlay::Stats => HelpContext::Stats,
                     Overlay::Pause => HelpContext::Pause,
+                    Overlay::FileTypes => HelpContext::FileTypes,
                 };
             }
         }
@@ -439,9 +460,102 @@ impl App {
         Ok(())
     }
 
+    fn open_file_types(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let saved = self
+            .store
+            .find_repository_id(&session.repo.identity)
+            .ok()
+            .flatten()
+            .map(|id| self.store.load_file_type_prefs(id).unwrap_or_default())
+            .unwrap_or_default();
+        self.file_types = Some(FileTypesView::from_progress(
+            &session.repo.display_name,
+            &session.progress,
+            &saved,
+        ));
+        self.overlay = Some(Overlay::FileTypes);
+    }
+
+    fn handle_file_types_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t') => {
+                self.close_overlay()?;
+                Ok(false)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(view) = &mut self.file_types {
+                    view.move_by(1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(view) = &mut self.file_types {
+                    view.move_by(-1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                if let Some(view) = &mut self.file_types {
+                    view.toggle_selected();
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Persist the edited file-type toggles and rescan. On failure (e.g. every
+    /// type disabled), the previous prefs and session are kept and an error is shown.
+    fn apply_file_type_prefs(&mut self) -> crate::Result<()> {
+        let Some(view) = self.file_types.take() else {
+            return Ok(());
+        };
+        let Some(session) = &self.session else {
+            return Ok(());
+        };
+        let repo_id = session.repo_id;
+        let input = session.repo.input.clone();
+        let selected_path = session.tree.selected_path();
+
+        let old_prefs: Vec<(String, bool)> = self
+            .store
+            .load_file_type_prefs(repo_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        let new_prefs = view.to_prefs();
+        self.store.save_file_type_prefs(repo_id, &new_prefs)?;
+
+        match load_session(&input, &self.cfg, &mut self.store) {
+            Ok(mut new_session) => {
+                if let Some(path) = &selected_path {
+                    new_session.tree.jump_to_path(path);
+                }
+                self.session = Some(new_session);
+            }
+            Err(err) => {
+                // Revert the saved prefs so the overlay does not force itself
+                // open again next time, and keep the existing session intact.
+                let _ = self.store.save_file_type_prefs(repo_id, &old_prefs);
+                if let Some(session) = &mut self.session {
+                    session.tree.message = Some(format!("file types not applied: {err}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn close_overlay(&mut self) -> crate::Result<()> {
         if self.overlay == Some(Overlay::Settings) {
             self.apply_live_settings()?;
+        }
+        if self.overlay == Some(Overlay::FileTypes) {
+            self.apply_file_type_prefs()?;
         }
         self.overlay = None;
         Ok(())
@@ -745,6 +859,10 @@ impl App {
                 self.clear_tree_skip()?;
                 Ok(false)
             }
+            KeyCode::Char('t') => {
+                self.open_file_types();
+                Ok(false)
+            }
             KeyCode::Char('e') => {
                 if let Some(s) = &mut self.session {
                     if s.dependency_mode {
@@ -1029,6 +1147,7 @@ impl App {
     fn open_from_home(&mut self, input: &str) -> crate::Result<()> {
         match load_session(input, &self.cfg, &mut self.store) {
             Ok(session) => {
+                let show_file_types = session.show_file_types_overlay;
                 self.session = Some(session);
                 self.home.error = None;
                 self.place = Place::Tree;
@@ -1036,6 +1155,9 @@ impl App {
                 self.help = false;
                 self.showing_splash = false;
                 self.splash_started = None;
+                if show_file_types {
+                    self.open_file_types();
+                }
                 Ok(())
             }
             Err(err) => {
@@ -1351,47 +1473,57 @@ fn load_session(
     store: &mut SqliteStore,
 ) -> crate::Result<RepoSession> {
     let resolved = resolve_source(input, &cfg.cache_dir, cfg.refresh)?;
-    let walk = walk_options(&cfg.user);
+
+    if resolved.root.is_dir() && resolved.identity.starts_with("local:") {
+        let local_path = resolved.identity.trim_start_matches("local:");
+        let p = PathBuf::from(local_path);
+        if p.is_file() {
+            // Explicitly opening a single file bypasses saved repository-level prefs.
+            let walk = walk_options(&cfg.user, FileTypePrefs::default());
+            let (parent, scan) = single_file_scan(&p, walk)?;
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let mut resolved_root = resolved.clone();
+            resolved_root.root = parent;
+            let import_edges = scan.import_edges.clone();
+            let (repo_id, progress) = store.sync_scan(
+                &resolved_root,
+                &scan,
+                cfg.user.progress.keep_done_on_refresh,
+            )?;
+            if !progress
+                .files
+                .iter()
+                .any(|f| f.derive_status() != FileStatus::Skipped)
+            {
+                return Err(Error::NoChunks);
+            }
+            return Ok(RepoSession::from_parts(
+                resolved_root,
+                repo_id,
+                progress,
+                Some(name),
+                DependencySettings {
+                    import_edges,
+                    mode: cfg.user.progress.mode,
+                    direction: cfg.user.progress.dependency_direction,
+                },
+                cfg.user.progress.hide_skipped,
+                false,
+            ));
+        }
+    }
+
+    let saved_prefs = match store.find_repository_id(&resolved.identity)? {
+        Some(id) => store.load_file_type_prefs(id)?,
+        None => FileTypePrefs::default(),
+    };
+    let show_file_types_overlay = saved_prefs.is_empty();
+    let walk = walk_options(&cfg.user, saved_prefs);
 
     let (progress_repo, scan, single_file) = if resolved.root.is_dir() {
-        if resolved.identity.starts_with("local:") {
-            let local_path = resolved.identity.trim_start_matches("local:");
-            let p = PathBuf::from(local_path);
-            if p.is_file() {
-                let (parent, scan) = single_file_scan(&p, walk)?;
-                let name = p
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let mut resolved_root = resolved.clone();
-                resolved_root.root = parent;
-                let import_edges = scan.import_edges.clone();
-                let (repo_id, progress) = store.sync_scan(
-                    &resolved_root,
-                    &scan,
-                    cfg.user.progress.keep_done_on_refresh,
-                )?;
-                if !progress
-                    .files
-                    .iter()
-                    .any(|f| f.derive_status() != FileStatus::Skipped)
-                {
-                    return Err(Error::NoChunks);
-                }
-                return Ok(RepoSession::from_parts(
-                    resolved_root,
-                    repo_id,
-                    progress,
-                    Some(name),
-                    DependencySettings {
-                        import_edges,
-                        mode: cfg.user.progress.mode,
-                        direction: cfg.user.progress.dependency_direction,
-                    },
-                    cfg.user.progress.hide_skipped,
-                ));
-            }
-        }
         let scan = scan_repository(&resolved.root, walk)?;
         (resolved, scan, None)
     } else {
@@ -1418,10 +1550,11 @@ fn load_session(
             direction: cfg.user.progress.dependency_direction,
         },
         cfg.user.progress.hide_skipped,
+        show_file_types_overlay,
     ))
 }
 
-fn walk_options(user: &UserConfig) -> WalkOptions {
+fn walk_options(user: &UserConfig, file_types: FileTypePrefs) -> WalkOptions {
     WalkOptions {
         max_line_cols: 200,
         max_file_lines: 5_000,
@@ -1433,6 +1566,7 @@ fn walk_options(user: &UserConfig) -> WalkOptions {
             include_doc_comments: user.content.include_doc_comments,
             include_comments: user.content.include_comments,
         },
+        file_types,
     }
 }
 
@@ -1444,6 +1578,7 @@ impl RepoSession {
         single_file: Option<String>,
         dependency: DependencySettings,
         hide_skipped: bool,
+        show_file_types_overlay: bool,
     ) -> Self {
         let dependency_mode = uses_dependency_mode(dependency.mode)
             && !dependency.import_edges.is_empty()
@@ -1487,6 +1622,7 @@ impl RepoSession {
             dependency_mode,
             entry_override: None,
             ordered_paths,
+            show_file_types_overlay,
         }
     }
 
@@ -1559,7 +1695,7 @@ pub mod headless {
         cache: &Path,
         user: UserConfig,
     ) -> crate::Result<App> {
-        App::open(
+        let mut app = App::open(
             path,
             &AppConfig {
                 cache_dir: cache.to_path_buf(),
@@ -1569,7 +1705,13 @@ pub mod headless {
                 user,
                 config_path: cache.join("test-config.toml"),
             },
-        )
+        )?;
+        // First-ever open shows the File types overlay; accept the defaults so
+        // callers that are not exercising that overlay see a plain Tree.
+        if overlay_name(&app) == Some("file_types") {
+            press(&mut app, KeyCode::Esc)?;
+        }
+        Ok(app)
     }
 
     pub fn place_name(app: &App) -> &'static str {
@@ -1587,6 +1729,7 @@ pub mod headless {
             Some(Overlay::Settings) => Some("settings"),
             Some(Overlay::Stats) => Some("stats"),
             Some(Overlay::Pause) => Some("pause"),
+            Some(Overlay::FileTypes) => Some("file_types"),
             None => None,
         }
     }
@@ -2013,6 +2156,168 @@ mod tests {
                 .find(|f| f.relative_path == path)
                 .map(|f| f.derive_status()),
             Some(FileStatus::Todo)
+        );
+    }
+
+    fn types_repo_dir() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("README.md"), "documentation\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn file_types_overlay_opens_on_first_open_only() {
+        let repo = types_repo_dir();
+        let state_dir = tempdir().unwrap();
+        let db = state_dir.path().join("db.sqlite");
+        let cache = state_dir.path().join("cache");
+
+        // Do not use the headless helper here: it auto-dismisses the overlay.
+        let mut app = App::open(
+            repo.path().to_str().unwrap(),
+            &AppConfig {
+                cache_dir: cache.clone(),
+                db_path: db.clone(),
+                refresh: false,
+                no_fx: true,
+                user: UserConfig::default(),
+                config_path: cache.join("test-config.toml"),
+            },
+        )
+        .unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("file_types"));
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::overlay_name(&app), None);
+
+        let app2 = App::open(
+            repo.path().to_str().unwrap(),
+            &AppConfig {
+                cache_dir: cache,
+                db_path: db,
+                refresh: false,
+                no_fx: true,
+                user: UserConfig::default(),
+                config_path: PathBuf::from("test-config.toml"),
+            },
+        )
+        .unwrap();
+        assert_eq!(headless::overlay_name(&app2), None);
+    }
+
+    #[test]
+    fn tree_t_opens_file_types_overlay_and_enabling_md_makes_readme_todo() {
+        let repo = types_repo_dir();
+        let state_dir = tempdir().unwrap();
+        let db = state_dir.path().join("db.sqlite");
+        let cache = state_dir.path().join("cache");
+        let mut app = headless::open_local(repo.path().to_str().unwrap(), &db, &cache).unwrap();
+
+        assert_eq!(
+            app.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == "README.md")
+                .map(|f| f.derive_status()),
+            Some(FileStatus::Skipped)
+        );
+
+        headless::press_char(&mut app, 't').unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("file_types"));
+        assert!(app
+            .file_types
+            .as_ref()
+            .is_some_and(|v| v.entries.iter().any(|e| e.key == ".md")));
+        let md_idx = app
+            .file_types
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|e| e.key == ".md")
+            .unwrap();
+        app.file_types.as_mut().unwrap().selected = md_idx;
+        headless::press_char(&mut app, ' ').unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+
+        assert_eq!(headless::overlay_name(&app), None);
+        assert_eq!(headless::place_name(&app), "tree");
+        assert_eq!(
+            app.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == "README.md")
+                .map(|f| f.derive_status()),
+            Some(FileStatus::Todo)
+        );
+    }
+
+    #[test]
+    fn disabling_all_file_types_keeps_previous_session_and_shows_error() {
+        let repo = types_repo_dir();
+        let state_dir = tempdir().unwrap();
+        let db = state_dir.path().join("db.sqlite");
+        let cache = state_dir.path().join("cache");
+        let mut app = headless::open_local(repo.path().to_str().unwrap(), &db, &cache).unwrap();
+        let before = app.progress().clone();
+
+        headless::press_char(&mut app, 't').unwrap();
+        let rs_idx = app
+            .file_types
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|e| e.key == ".rs")
+            .unwrap();
+        app.file_types.as_mut().unwrap().selected = rs_idx;
+        headless::press_char(&mut app, ' ').unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+
+        assert_eq!(headless::overlay_name(&app), None);
+        assert_eq!(headless::place_name(&app), "tree");
+        assert_eq!(app.progress(), &before);
+        assert!(app
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.message.as_ref())
+            .is_some());
+    }
+
+    #[test]
+    fn file_type_toggle_rescan_preserves_done_state() {
+        let repo = types_repo_dir();
+        let state_dir = tempdir().unwrap();
+        let db = state_dir.path().join("db.sqlite");
+        let cache = state_dir.path().join("cache");
+        let mut app = headless::open_local(repo.path().to_str().unwrap(), &db, &cache).unwrap();
+        headless::complete_recommended(&mut app).unwrap();
+        assert_eq!(headless::place_name(&app), "result");
+        headless::press_char(&mut app, 't').unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
+        assert_eq!(headless::overlay_name(&app), None);
+
+        headless::press_char(&mut app, 't').unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("file_types"));
+        let md_idx = app
+            .file_types
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .position(|e| e.key == ".md")
+            .unwrap();
+        app.file_types.as_mut().unwrap().selected = md_idx;
+        headless::press_char(&mut app, ' ').unwrap();
+        headless::press_char(&mut app, 'q').unwrap();
+
+        assert_eq!(
+            app.progress()
+                .files
+                .iter()
+                .find(|f| f.relative_path == "main.rs")
+                .map(|f| f.derive_status()),
+            Some(FileStatus::Done)
         );
     }
 }

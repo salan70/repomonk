@@ -49,6 +49,8 @@ pub struct TreeView {
     pub visible_rows: usize,
     /// Shown after Result Enter when the repository is fully done.
     pub repo_complete: bool,
+    /// One-line status/error banner (e.g. from the File types overlay), cleared on next input.
+    pub message: Option<String>,
 }
 
 impl TreeView {
@@ -82,6 +84,7 @@ impl TreeView {
             filter_editing: false,
             visible_rows: 1,
             repo_complete: false,
+            message: None,
         }
     }
 
@@ -438,9 +441,10 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     frame.render_widget(block, area);
 
     let filter_line = view.filter_editing || !view.filter.is_empty();
+    let second_line = filter_line || view.message.is_some();
     let panes = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if filter_line {
+        .constraints(if second_line {
             vec![
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -455,8 +459,8 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
             ]
         })
         .split(inner);
-    let list_pane = if filter_line { panes[2] } else { panes[1] };
-    let footer_pane = if filter_line { panes[3] } else { panes[2] };
+    let list_pane = if second_line { panes[2] } else { panes[1] };
+    let footer_pane = if second_line { panes[3] } else { panes[2] };
 
     // Header: repository-wide progress gauge.
     let (completed, total) = view.overall;
@@ -500,6 +504,14 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
             ])),
             panes[1],
         );
+    } else if let Some(message) = &view.message {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {message}"),
+                Style::default().fg(theme::MUTED),
+            ))),
+            panes[1],
+        );
     }
 
     // Body: tree rows.
@@ -525,6 +537,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
             ("Enter", "open"),
             ("j/k", "move"),
             ("Tab", "recommend"),
+            ("t", "file types"),
             ("Esc", "back"),
             ("?", "help"),
         ][..]

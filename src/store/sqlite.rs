@@ -10,6 +10,7 @@ use crate::domain::content::{
     ChunkCompletion, ChunkProgress, FileProgress, FileStatus, ManualOverride, RepoProgress,
     ResolvedRepository, ScanResult, SessionSummary, SkipReason, TypingCheckpoint,
 };
+use crate::domain::file_type::FileTypePrefs;
 use crate::Error;
 
 /// A previously opened repository for the home Recent list.
@@ -95,6 +96,13 @@ CREATE TABLE IF NOT EXISTS typing_checkpoints (
     started_at TEXT NOT NULL,
     auto_indent INTEGER NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS repo_file_types (
+    repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    type_key TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    PRIMARY KEY (repository_id, type_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);
@@ -457,6 +465,55 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Repository id for an already-known identity, if it has been opened before.
+    pub fn find_repository_id(&self, identity: &str) -> crate::Result<Option<i64>> {
+        let id = self
+            .conn
+            .query_row(
+                "SELECT id FROM repositories WHERE identity = ?1",
+                params![identity],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
+    /// Saved file-type toggles for a repository (empty if never configured).
+    pub fn load_file_type_prefs(&self, repo_id: i64) -> crate::Result<FileTypePrefs> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT type_key, enabled FROM repo_file_types WHERE repository_id = ?1")?;
+        let rows: std::collections::HashMap<String, bool> = stmt
+            .query_map(params![repo_id], |row| {
+                let key: String = row.get(0)?;
+                let enabled: i64 = row.get(1)?;
+                Ok((key, enabled != 0))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(FileTypePrefs::new(rows))
+    }
+
+    /// Replace all saved file-type toggles for a repository in one transaction.
+    pub fn save_file_type_prefs(
+        &mut self,
+        repo_id: i64,
+        prefs: &[(String, bool)],
+    ) -> crate::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM repo_file_types WHERE repository_id = ?1",
+            params![repo_id],
+        )?;
+        for (key, enabled) in prefs {
+            tx.execute(
+                "INSERT INTO repo_file_types(repository_id, type_key, enabled) VALUES (?1, ?2, ?3)",
+                params![repo_id, key, if *enabled { 1 } else { 0 }],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn touch_repository(&self, repo_id: i64) -> crate::Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -693,6 +750,8 @@ fn parse_skip_reason(raw: &str) -> SkipReason {
         || raw == "config or docs (include_configs=false)"
     {
         SkipReason::ConfigFile
+    } else if raw == "file type disabled" {
+        SkipReason::FileTypeDisabled
     } else if raw == "no typeable chunks" || raw == "no typeable content" {
         SkipReason::NoChunks
     } else if let Some(rest) = raw.strip_prefix("line longer than ") {
@@ -1143,5 +1202,65 @@ mod tests {
             parse_skip_reason("config file (include_configs=false)"),
             SkipReason::ConfigFile
         );
+    }
+
+    #[test]
+    fn file_type_prefs_round_trip_and_survive_refresh_and_cascade() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let body = "fn main() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\n";
+        let repo = ResolvedRepository {
+            identity: "local:/tmp/types".into(),
+            display_name: "types".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/types".into(),
+            input: "/tmp/types".into(),
+        };
+        let scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "src/main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("src/main.rs", body)],
+            }],
+            import_edges: Vec::new(),
+        };
+        assert_eq!(store.find_repository_id(&repo.identity).unwrap(), None);
+        let (repo_id, _) = store.sync_scan(&repo, &scan, true).unwrap();
+        assert_eq!(
+            store.find_repository_id(&repo.identity).unwrap(),
+            Some(repo_id)
+        );
+
+        assert!(store.load_file_type_prefs(repo_id).unwrap().is_empty());
+
+        store
+            .save_file_type_prefs(
+                repo_id,
+                &[(".rs".to_string(), true), (".md".to_string(), false)],
+            )
+            .unwrap();
+        let prefs = store.load_file_type_prefs(repo_id).unwrap();
+        assert_eq!(prefs.get(".rs"), Some(true));
+        assert_eq!(prefs.get(".md"), Some(false));
+        assert_eq!(prefs.get(".json"), None);
+
+        // Refresh should not clear saved prefs.
+        store.sync_scan(&repo, &scan, true).unwrap();
+        let prefs_after_refresh = store.load_file_type_prefs(repo_id).unwrap();
+        assert_eq!(prefs_after_refresh.get(".rs"), Some(true));
+
+        // Overwrite replaces the full set.
+        store
+            .save_file_type_prefs(repo_id, &[(".rs".to_string(), false)])
+            .unwrap();
+        let overwritten = store.load_file_type_prefs(repo_id).unwrap();
+        assert_eq!(overwritten.get(".rs"), Some(false));
+        assert_eq!(overwritten.get(".md"), None);
+
+        store
+            .conn
+            .execute("DELETE FROM repositories WHERE id = ?1", params![repo_id])
+            .unwrap();
+        assert!(store.load_file_type_prefs(repo_id).unwrap().is_empty());
     }
 }

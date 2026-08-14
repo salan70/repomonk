@@ -32,6 +32,7 @@ pub enum SkipReason {
     FileTooLarge { max_lines: usize },
     TestFile,
     ConfigFile,
+    FileTypeDisabled,
     NoChunks,
     IoError(String),
 }
@@ -46,6 +47,7 @@ impl SkipReason {
             Self::FileTooLarge { max_lines } => format!("more than {max_lines} lines"),
             Self::TestFile => "test file (include_tests=false)".into(),
             Self::ConfigFile => "config or docs (include_configs=false)".into(),
+            Self::FileTypeDisabled => "file type disabled".into(),
             Self::NoChunks => "no typeable content".into(),
             Self::IoError(msg) => format!("read error: {msg}"),
         }
