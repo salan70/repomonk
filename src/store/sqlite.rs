@@ -135,6 +135,12 @@ impl SqliteStore {
     }
 
     fn migrate(&self) -> crate::Result<()> {
+        // Pre-release schema churn: `repo_file_types` briefly shipped with an
+        // `enabled INTEGER` column before switching to `state TEXT`. Drop and
+        // let `CREATE TABLE IF NOT EXISTS` below recreate it; the toggles it
+        // held are cheap to lose (the overlay just reappears on next open).
+        drop_table_if_missing_column(&self.conn, "repo_file_types", "state")?;
+
         self.conn.execute_batch(SCHEMA)?;
         self.conn.execute(
             r#"
@@ -740,6 +746,19 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> cr
     Ok(())
 }
 
+/// Drop `table` if it exists but predates `column` (an incompatible earlier shape).
+/// A no-op when the table doesn't exist yet or already has the column.
+fn drop_table_if_missing_column(conn: &Connection, table: &str, column: &str) -> crate::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<_, _>>()?;
+    if !columns.is_empty() && !columns.iter().any(|name| name == column) {
+        conn.execute(&format!("DROP TABLE {table}"), [])?;
+    }
+    Ok(())
+}
+
 fn parse_skip_reason(raw: &str) -> SkipReason {
     if raw == "excluded directory" {
         SkipReason::VcsOrDependencyDir
@@ -1204,6 +1223,61 @@ mod tests {
         assert_eq!(
             parse_skip_reason("config file (include_configs=false)"),
             SkipReason::ConfigFile
+        );
+    }
+
+    #[test]
+    fn migrates_pre_release_repo_file_types_shape() {
+        // Simulate a DB created before `enabled INTEGER` became `state TEXT`.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE repositories (
+                id INTEGER PRIMARY KEY NOT NULL,
+                identity TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                input TEXT NOT NULL,
+                root_path TEXT NOT NULL,
+                last_opened_at TEXT NOT NULL
+            );
+            CREATE TABLE repo_file_types (
+                repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+                type_key TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                PRIMARY KEY (repository_id, type_key)
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repositories(id, identity, display_name, source_kind, input, root_path, last_opened_at) VALUES (1, 'local:/tmp/old', 'old', 'local', '/tmp/old', '/tmp/old', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repo_file_types(repository_id, type_key, enabled) VALUES (1, '.rs', 1)",
+            [],
+        )
+        .unwrap();
+
+        let store = SqliteStore { conn };
+        store.migrate().unwrap();
+
+        // Old row is gone (dropped table), but querying by the new shape works.
+        let prefs = store.load_file_type_prefs(1).unwrap();
+        assert!(prefs.is_empty());
+        store
+            .conn
+            .execute(
+                "INSERT INTO repo_file_types(repository_id, type_key, state) VALUES (1, '.rs', 'included')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_file_type_prefs(1).unwrap().get(".rs"),
+            Some(FileTypeState::Included)
         );
     }
 
