@@ -109,12 +109,25 @@ pub struct ScannedFile {
     pub chunks: Vec<Chunk>,
 }
 
+/// A resolved repository-local import, with source location for flow order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportEdge {
+    pub importer: String,
+    pub imported: String,
+    /// 1-based line of the import / module declaration.
+    pub decl_line: usize,
+    /// 1-based line where a binding was first used outside import lines.
+    pub first_use_line: Option<usize>,
+    /// Import statement text for UI.
+    pub raw: String,
+}
+
 /// Full scan result for a repository root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanResult {
     pub files: Vec<ScannedFile>,
-    /// Resolved repository-local imports as `(importer, imported)` paths.
-    pub import_edges: Vec<(String, String)>,
+    /// Resolved repository-local imports.
+    pub import_edges: Vec<ImportEdge>,
 }
 
 impl ScanResult {

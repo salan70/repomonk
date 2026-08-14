@@ -19,6 +19,7 @@ pub enum HelpContext {
     Stats,
     Pause,
     FileTypes,
+    Flow,
 }
 
 pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
@@ -50,7 +51,9 @@ pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
             hint("·", "skipped"),
             hint("[n/m lines]", "progress"),
             hint("▸ recommend", "next file"),
-            hint("123", "dependency order"),
+            hint("▸ next", "next flow file"),
+            hint("—", "outside flow"),
+            hint("123", "flow order"),
         ]);
     }
     lines.push(Line::from(""));
@@ -93,10 +96,11 @@ fn context_lines(ctx: HelpContext) -> Vec<Line<'static>> {
             hint("Enter", "open"),
             hint("j/k", "move"),
             hint("g/G", "first / last"),
-            hint("Tab", "recommend"),
+            hint("Tab", "next"),
             hint("/", "filter"),
             hint("x/X", "skip / reset"),
             hint("h/l", "fold"),
+            hint("e", "how to proceed"),
             hint("t", "file types"),
         ],
         HelpContext::Typing => vec![
@@ -135,6 +139,11 @@ fn context_lines(ctx: HelpContext) -> Vec<Line<'static>> {
             hint("j/k", "move"),
             hint("Space/Enter", "cycle: on / off / hide"),
             hint("Esc/q/t", "apply & close"),
+        ],
+        HelpContext::Flow => vec![
+            hint("j/k", "move"),
+            hint("Enter/Space", "select"),
+            hint("Esc/q/e", "apply & close"),
         ],
     }
 }

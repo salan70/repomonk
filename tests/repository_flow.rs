@@ -188,8 +188,121 @@ fn scan_collects_repository_local_dependency_edges() {
     .unwrap();
 
     let scan = scan_repository(dir.path(), WalkOptions::default()).unwrap();
+    assert_eq!(scan.import_edges.len(), 1);
+    assert_eq!(scan.import_edges[0].importer, "src/main.ts");
+    assert_eq!(scan.import_edges[0].imported, "src/dep.ts");
+    assert_eq!(scan.import_edges[0].decl_line, 1);
+    assert_eq!(scan.import_edges[0].first_use_line, Some(2));
+}
+
+#[test]
+fn rust_flow_starts_at_main_and_recommend_follows() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/main.rs"),
+        "mod util;\nfn main() {\n    util::run();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/util.rs"), "pub fn run() {}\n").unwrap();
+
+    let state = tempdir().unwrap();
+    let mut user = repomonk::config::UserConfig::default();
+    user.progress.mode = repomonk::config::ProgressMode::Flow;
+    let mut app = repomonk::app::headless::open_local_with_user_config(
+        dir.path().to_str().unwrap(),
+        &state.path().join("db.sqlite"),
+        &state.path().join("cache"),
+        user,
+    )
+    .unwrap();
+
+    let paths = repomonk::app::headless::flow_paths(&app).expect("flow order");
+    assert_eq!(paths[0], "src/main.rs");
+    assert_eq!(paths[1], "src/util.rs");
     assert_eq!(
-        scan.import_edges,
-        vec![("src/main.ts".into(), "src/dep.ts".into())]
+        repomonk::app::headless::recommend_path(&app).as_deref(),
+        Some("src/main.rs")
     );
+
+    complete_recommended(&mut app).unwrap();
+    assert_eq!(
+        repomonk::app::headless::recommend_path(&app).as_deref(),
+        Some("src/util.rs")
+    );
+
+    let mut user_manual = repomonk::config::UserConfig::default();
+    user_manual.progress.mode = repomonk::config::ProgressMode::Manual;
+    let reopened = repomonk::app::headless::open_local_with_user_config(
+        dir.path().to_str().unwrap(),
+        &state.path().join("db.sqlite"),
+        &state.path().join("cache"),
+        user_manual,
+    )
+    .unwrap();
+    assert_eq!(
+        repomonk::app::headless::flow_entry(&reopened).as_deref(),
+        Some("src/main.rs")
+    );
+    assert_eq!(
+        repomonk::app::headless::flow_paths(&reopened).as_deref(),
+        Some(paths.as_slice())
+    );
+}
+
+#[test]
+fn typescript_flow_starts_at_index() {
+    let dir = tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{ "name": "demo", "main": "src/index.ts" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/index.ts"),
+        "import { x } from './x';\nx();\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/x.ts"), "export function x() {}\n").unwrap();
+
+    let state = tempdir().unwrap();
+    let mut user = repomonk::config::UserConfig::default();
+    user.progress.mode = repomonk::config::ProgressMode::Flow;
+    let app = repomonk::app::headless::open_local_with_user_config(
+        dir.path().to_str().unwrap(),
+        &state.path().join("db.sqlite"),
+        &state.path().join("cache"),
+        user,
+    )
+    .unwrap();
+    let paths = repomonk::app::headless::flow_paths(&app).expect("flow order");
+    assert_eq!(paths[0], "src/index.ts");
+    assert_eq!(paths[1], "src/x.ts");
+}
+
+#[test]
+fn python_flow_starts_at_main() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("main.py"), "from util import run\nrun()\n").unwrap();
+    std::fs::write(dir.path().join("util.py"), "def run():\n    pass\n").unwrap();
+
+    let state = tempdir().unwrap();
+    let mut user = repomonk::config::UserConfig::default();
+    user.progress.mode = repomonk::config::ProgressMode::Flow;
+    let app = repomonk::app::headless::open_local_with_user_config(
+        dir.path().to_str().unwrap(),
+        &state.path().join("db.sqlite"),
+        &state.path().join("cache"),
+        user,
+    )
+    .unwrap();
+    let paths = repomonk::app::headless::flow_paths(&app).expect("flow order");
+    assert_eq!(paths[0], "main.py");
+    assert_eq!(paths[1], "util.py");
 }

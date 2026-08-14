@@ -60,7 +60,8 @@ pub struct FxConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ProgressMode {
     Manual,
-    Dependency,
+    #[serde(alias = "dependency")]
+    Flow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,14 +131,22 @@ impl ProgressMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Manual => "manual",
-            Self::Dependency => "dependency",
+            Self::Flow => "flow",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "manual" => Some(Self::Manual),
+            "flow" | "dependency" => Some(Self::Flow),
+            _ => None,
         }
     }
 
     pub fn cycle(self) -> Self {
         match self {
-            Self::Manual => Self::Dependency,
-            Self::Dependency => Self::Manual,
+            Self::Manual => Self::Flow,
+            Self::Flow => Self::Manual,
         }
     }
 }
@@ -264,7 +273,7 @@ fn parse_toml(text: &str, path: &Path) -> crate::Result<UserConfig> {
     let cfg: UserConfig = toml::from_str(text).map_err(|e| {
         Error::Config(format!(
             "invalid config at {}:\n  {e}\nFix: correct the value to match docs/product-requirements.md §11 \
-             (booleans true/false, tab_width 1–8, mode \"manual\"|\"dependency\", \
+             (booleans true/false, tab_width 1–8, mode \"manual\"|\"flow\", \
              dependency_direction \"top_down\"|\"bottom_up\", intensity \"off\"|\"subtle\"|\"normal\"|\"high\", \
              preset \"classic\"|\"blaze\"|\"smear\"|\"ripple\"|\"fireworks\")",
             path.display()
@@ -447,6 +456,17 @@ intensity = "normal"
         fs::write(&path, text).unwrap();
         let err = load(&path).unwrap_err();
         assert!(err.to_string().contains("invalid config"));
+    }
+
+    #[test]
+    fn legacy_dependency_mode_maps_to_flow() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = toml::to_string_pretty(&UserConfig::default())
+            .unwrap()
+            .replace("mode = \"manual\"", "mode = \"dependency\"");
+        fs::write(&path, text).unwrap();
+        assert_eq!(load(&path).unwrap().progress.mode, ProgressMode::Flow);
     }
 
     #[test]

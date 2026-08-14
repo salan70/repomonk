@@ -32,12 +32,17 @@ pub fn draw_typing(
     now_ms: u64,
     fx: Option<&FxState>,
     show_live_speed: bool,
+    step_label: Option<&str>,
 ) {
     theme::fill_background(frame, area);
 
+    let title_path = match step_label {
+        Some(step) => format!(" {step}  {path} "),
+        None => format!(" {path} "),
+    };
     let title = Line::from(vec![
         Span::styled(
-            format!(" {path} "),
+            title_path,
             Style::default()
                 .fg(theme::BLUE)
                 .bg(theme::BG)

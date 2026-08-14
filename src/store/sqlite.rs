@@ -6,6 +6,7 @@ use std::path::Path;
 use chrono::{NaiveDate, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
+use crate::config::ProgressMode;
 use crate::domain::content::{
     ChunkCompletion, ChunkProgress, FileProgress, FileStatus, ManualOverride, RepoProgress,
     ResolvedRepository, ScanResult, SessionSummary, SkipReason, TypingCheckpoint,
@@ -150,6 +151,8 @@ impl SqliteStore {
             [],
         )?;
         ensure_column(&self.conn, "repo_files", "manual_override", "TEXT")?;
+        ensure_column(&self.conn, "repositories", "progress_mode", "TEXT")?;
+        ensure_column(&self.conn, "repositories", "entry_path", "TEXT")?;
         Ok(())
     }
 
@@ -520,6 +523,38 @@ impl SqliteStore {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Saved flow mode and entry for a repository (`None` = not chosen yet).
+    pub fn load_repo_flow_prefs(
+        &self,
+        repo_id: i64,
+    ) -> crate::Result<(Option<ProgressMode>, Option<String>)> {
+        let row: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT progress_mode, entry_path FROM repositories WHERE id = ?1",
+                params![repo_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((mode, entry)) = row else {
+            return Ok((None, None));
+        };
+        Ok((mode.as_deref().and_then(ProgressMode::parse), entry))
+    }
+
+    pub fn save_repo_flow_prefs(
+        &self,
+        repo_id: i64,
+        mode: ProgressMode,
+        entry: Option<&str>,
+    ) -> crate::Result<()> {
+        self.conn.execute(
+            "UPDATE repositories SET progress_mode = ?1, entry_path = ?2 WHERE id = ?3",
+            params![mode.as_str(), entry, repo_id],
+        )?;
         Ok(())
     }
 
@@ -1347,5 +1382,81 @@ mod tests {
             .execute("DELETE FROM repositories WHERE id = ?1", params![repo_id])
             .unwrap();
         assert!(store.load_file_type_prefs(repo_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn flow_prefs_round_trip() {
+        let mut store = SqliteStore::open_in_memory().unwrap();
+        let repo = ResolvedRepository {
+            identity: "local:/tmp/flow".into(),
+            display_name: "flow".into(),
+            kind: SourceKind::Local,
+            root: "/tmp/flow".into(),
+            input: "/tmp/flow".into(),
+        };
+        let scan = ScanResult {
+            files: vec![ScannedFile {
+                relative_path: "src/main.rs".into(),
+                status: FileStatus::Todo,
+                skip_reason: None,
+                chunks: vec![sample_chunk("src/main.rs", "fn main() {}\n")],
+            }],
+            import_edges: Vec::new(),
+        };
+        let (repo_id, _) = store.sync_scan(&repo, &scan, true).unwrap();
+        assert_eq!(store.load_repo_flow_prefs(repo_id).unwrap(), (None, None));
+
+        store
+            .save_repo_flow_prefs(repo_id, ProgressMode::Flow, Some("src/main.rs"))
+            .unwrap();
+        assert_eq!(
+            store.load_repo_flow_prefs(repo_id).unwrap(),
+            (Some(ProgressMode::Flow), Some("src/main.rs".into()))
+        );
+
+        store
+            .save_repo_flow_prefs(repo_id, ProgressMode::Manual, None)
+            .unwrap();
+        assert_eq!(
+            store.load_repo_flow_prefs(repo_id).unwrap(),
+            (Some(ProgressMode::Manual), None)
+        );
+    }
+
+    #[test]
+    fn migrates_repo_flow_pref_columns_from_old_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE repositories (
+                id INTEGER PRIMARY KEY NOT NULL,
+                identity TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                input TEXT NOT NULL,
+                root_path TEXT NOT NULL,
+                last_opened_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repositories(id, identity, display_name, source_kind, input, root_path, last_opened_at) VALUES (1, 'local:/tmp/old-flow', 'old', 'local', '/tmp/old-flow', '/tmp/old-flow', '2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let store = SqliteStore { conn };
+        store.migrate().unwrap();
+
+        assert_eq!(store.load_repo_flow_prefs(1).unwrap(), (None, None));
+        store
+            .save_repo_flow_prefs(1, ProgressMode::Flow, Some("src/lib.rs"))
+            .unwrap();
+        assert_eq!(
+            store.load_repo_flow_prefs(1).unwrap(),
+            (Some(ProgressMode::Flow), Some("src/lib.rs".into()))
+        );
     }
 }

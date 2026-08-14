@@ -10,10 +10,11 @@ use ratatui::style::Color;
 use crate::config::{save as save_user_config, UserConfig};
 use crate::config::{DependencyDirection, ProgressMode};
 use crate::domain::content::{
-    ChunkCompletion, FileStatus, ManualOverride, RepoProgress, ResolvedRepository, SessionSummary,
-    TypingCheckpoint, TypingMetrics,
+    ChunkCompletion, FileStatus, ImportEdge, ManualOverride, RepoProgress, ResolvedRepository,
+    SessionSummary, TypingCheckpoint, TypingMetrics,
 };
-use crate::domain::dependency::{order_files, uses_dependency_mode};
+use crate::domain::dependency::{order_files, uses_flow_mode, FlowOrder};
+use crate::domain::entry::{detect_entry_candidates, EntryCandidate};
 use crate::domain::file_type::{hidden_paths, FileTypePrefs, FileTypeState};
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
 use crate::scan::extract::ExtractOptions;
@@ -21,12 +22,13 @@ use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
 use crate::store::SqliteStore;
 use crate::ui::file_types::{draw_file_types, FileTypesView};
+use crate::ui::flow::{draw_flow, FlowView};
 use crate::ui::fx::FxState;
 use crate::ui::help::{draw_help, HelpContext};
 use crate::ui::highlight::highlight_chars;
 use crate::ui::home::{draw_home, draw_search_modal, HomeView};
 use crate::ui::pause::draw_pause;
-use crate::ui::result::{draw_result, ResultView};
+use crate::ui::result::{draw_result, NextStep, ResultView};
 use crate::ui::search::SearchState;
 use crate::ui::settings::{draw_settings, SettingKind, SettingsView};
 use crate::ui::splash::{draw_splash, looping_logo_elapsed, SPLASH_TOTAL_MS};
@@ -51,6 +53,7 @@ enum Overlay {
     Stats,
     Pause,
     FileTypes,
+    Flow,
 }
 
 #[derive(Debug, Clone)]
@@ -86,20 +89,26 @@ struct RepoSession {
     typing_checkpoint_last_saved_ms: u64,
     result: Option<ResultView>,
     single_file: Option<String>,
-    import_edges: Vec<(String, String)>,
+    import_edges: Vec<ImportEdge>,
     dependency_direction: DependencyDirection,
-    dependency_mode: bool,
-    entry_override: Option<String>,
-    ordered_paths: Option<Vec<String>>,
+    progress_mode: ProgressMode,
+    entry: Option<String>,
+    flow: Option<FlowOrder>,
+    manifest_hints: Vec<EntryCandidate>,
     /// True right after `load_session` when saved file-type prefs were empty
     /// (i.e. this repository has never had the File types overlay closed on it).
     show_file_types_overlay: bool,
+    /// True when this repository has never chosen a progress mode.
+    show_flow_overlay: bool,
 }
 
 struct DependencySettings {
-    import_edges: Vec<(String, String)>,
+    import_edges: Vec<ImportEdge>,
     mode: ProgressMode,
     direction: DependencyDirection,
+    entry: Option<String>,
+    manifest_hints: Vec<EntryCandidate>,
+    show_flow_overlay: bool,
 }
 
 /// Tree-display flags that come from user config plus the current file-type prefs.
@@ -121,6 +130,7 @@ pub struct App {
     stats: Option<StatsView>,
     settings: SettingsView,
     file_types: Option<FileTypesView>,
+    flow_view: Option<FlowView>,
     session: Option<RepoSession>,
     fx: FxState,
     splash_started: Option<Instant>,
@@ -133,6 +143,7 @@ impl App {
         let session = load_session(input, cfg, &mut store)?;
         let home = load_home_view(&store)?;
         let show_file_types = session.show_file_types_overlay;
+        let show_flow = session.show_flow_overlay;
         let mut app = Self {
             cfg: cfg.clone(),
             store,
@@ -145,12 +156,15 @@ impl App {
             stats: None,
             settings: SettingsView::new(),
             file_types: None,
+            flow_view: None,
             session: Some(session),
             fx: FxState::with_config(cfg.user.fx.intensity, cfg.user.fx.preset),
             splash_started: None,
         };
         if show_file_types {
             app.open_file_types();
+        } else if show_flow {
+            app.open_flow();
         }
         Ok(app)
     }
@@ -171,6 +185,7 @@ impl App {
             stats: None,
             settings: SettingsView::new(),
             file_types: None,
+            flow_view: None,
             session: None,
             fx: FxState::with_config(cfg.user.fx.intensity, cfg.user.fx.preset),
             splash_started: None,
@@ -252,6 +267,11 @@ impl App {
                                 if let (Some(s), Some(snap)) = (&self.session, &typing_snap) {
                                     let location =
                                         format!("{} › {}", s.repo.display_name, s.typing_path);
+                                    let step_label = s.flow.as_ref().and_then(|order| {
+                                        order
+                                            .step_number(&s.typing_path)
+                                            .map(|n| format!("{n}/{}", order.reachable_total()))
+                                    });
                                     draw_typing(
                                         frame,
                                         area,
@@ -262,6 +282,7 @@ impl App {
                                         now_ms,
                                         self.cfg.fx_enabled().then_some(&self.fx),
                                         self.cfg.user.typing.show_live_speed,
+                                        step_label.as_deref(),
                                     );
                                 }
                             }
@@ -289,6 +310,11 @@ impl App {
                             Some(Overlay::FileTypes) => {
                                 if let Some(view) = &self.file_types {
                                     draw_file_types(frame, area, view);
+                                }
+                            }
+                            Some(Overlay::Flow) => {
+                                if let Some(view) = &self.flow_view {
+                                    draw_flow(frame, area, view);
                                 }
                             }
                             None => {}
@@ -394,6 +420,7 @@ impl App {
             Some(Overlay::Settings) => return self.handle_settings_key(key),
             Some(Overlay::Stats) => return self.handle_stats_key(key),
             Some(Overlay::FileTypes) => return self.handle_file_types_key(key),
+            Some(Overlay::Flow) => return self.handle_flow_key(key),
             Some(Overlay::Pause) | None => {}
         }
 
@@ -435,6 +462,7 @@ impl App {
                     Overlay::Stats => HelpContext::Stats,
                     Overlay::Pause => HelpContext::Pause,
                     Overlay::FileTypes => HelpContext::FileTypes,
+                    Overlay::Flow => HelpContext::Flow,
                 };
             }
         }
@@ -486,6 +514,58 @@ impl App {
         self.overlay = Some(Overlay::FileTypes);
     }
 
+    fn open_flow(&mut self) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        if session.single_file.is_some() {
+            return;
+        }
+        let typeable: Vec<String> = session
+            .progress
+            .files
+            .iter()
+            .filter(|file| file.derive_status() != FileStatus::Skipped)
+            .map(|file| file.relative_path.clone())
+            .collect();
+        let candidates =
+            detect_entry_candidates(&typeable, &session.import_edges, &session.manifest_hints);
+        let flow_enabled =
+            !session.import_edges.is_empty() && !candidates.is_empty() && typeable.len() > 1;
+        let disabled_reason = if !flow_enabled {
+            if session.import_edges.is_empty() {
+                Some("no import-analyzable language found".into())
+            } else if candidates.is_empty() {
+                Some("no entry point could be detected".into())
+            } else {
+                Some("need more than one typeable file".into())
+            }
+        } else {
+            None
+        };
+        let tree_selection = session.tree.selected_file_path().filter(|path| {
+            session.progress.files.iter().any(|file| {
+                file.relative_path == *path && file.derive_status() != FileStatus::Skipped
+            })
+        });
+        let file_count = session
+            .flow
+            .as_ref()
+            .map(FlowOrder::reachable_total)
+            .unwrap_or(typeable.len());
+        self.flow_view = Some(FlowView::new(
+            &session.repo.display_name,
+            session.progress_mode,
+            session.entry.clone(),
+            candidates,
+            tree_selection,
+            flow_enabled,
+            disabled_reason,
+            file_count,
+        ));
+        self.overlay = Some(Overlay::Flow);
+    }
+
     fn handle_file_types_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t') => {
@@ -507,6 +587,34 @@ impl App {
             KeyCode::Char(' ') | KeyCode::Enter => {
                 if let Some(view) = &mut self.file_types {
                     view.cycle_selected();
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn handle_flow_key(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('e') => {
+                self.close_overlay()?;
+                Ok(false)
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(view) = &mut self.flow_view {
+                    view.move_by(1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(view) = &mut self.flow_view {
+                    view.move_by(-1);
+                }
+                Ok(false)
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                if let Some(view) = &mut self.flow_view {
+                    view.activate_selected();
                 }
                 Ok(false)
             }
@@ -563,8 +671,53 @@ impl App {
         }
         if self.overlay == Some(Overlay::FileTypes) {
             self.apply_file_type_prefs()?;
+            self.overlay = None;
+            if self.should_prompt_flow() {
+                self.open_flow();
+            }
+            return Ok(());
+        }
+        if self.overlay == Some(Overlay::Flow) {
+            self.apply_flow_prefs()?;
         }
         self.overlay = None;
+        Ok(())
+    }
+
+    fn should_prompt_flow(&self) -> bool {
+        let Some(session) = &self.session else {
+            return false;
+        };
+        if session.single_file.is_some() {
+            return false;
+        }
+        self.store
+            .load_repo_flow_prefs(session.repo_id)
+            .ok()
+            .is_some_and(|(mode, _)| mode.is_none())
+    }
+
+    fn apply_flow_prefs(&mut self) -> crate::Result<()> {
+        let Some(view) = self.flow_view.take() else {
+            return Ok(());
+        };
+        let Some(session) = &self.session else {
+            return Ok(());
+        };
+        let repo_id = session.repo_id;
+        let mode = if view.flow_enabled {
+            view.mode
+        } else {
+            ProgressMode::Manual
+        };
+        let entry = view.entry;
+        self.store
+            .save_repo_flow_prefs(repo_id, mode, entry.as_deref())?;
+        if let Some(session) = &mut self.session {
+            session.progress_mode = mode;
+            session.entry = entry;
+            session.recompute_flow();
+        }
         Ok(())
     }
 
@@ -871,20 +1024,7 @@ impl App {
                 Ok(false)
             }
             KeyCode::Char('e') => {
-                if let Some(s) = &mut self.session {
-                    if s.dependency_mode {
-                        if let Some(path) = s.tree.selected_file_path() {
-                            let is_typeable = s.progress.files.iter().any(|file| {
-                                file.relative_path == path
-                                    && file.derive_status() != FileStatus::Skipped
-                            });
-                            if is_typeable {
-                                s.entry_override = Some(path);
-                                s.recompute_dependency_order();
-                            }
-                        }
-                    }
-                }
+                self.open_flow();
                 Ok(false)
             }
             KeyCode::Enter => {
@@ -1143,11 +1283,7 @@ impl App {
                 file.status = file.derive_status();
             }
         }
-        if session.dependency_mode {
-            session.recompute_dependency_order();
-        } else {
-            session.tree.refresh_rows(&session.progress);
-        }
+        session.recompute_flow();
         Ok(())
     }
 
@@ -1155,6 +1291,7 @@ impl App {
         match load_session(input, &self.cfg, &mut self.store) {
             Ok(session) => {
                 let show_file_types = session.show_file_types_overlay;
+                let show_flow = session.show_flow_overlay;
                 self.session = Some(session);
                 self.home.error = None;
                 self.place = Place::Tree;
@@ -1164,6 +1301,8 @@ impl App {
                 self.splash_started = None;
                 if show_file_types {
                     self.open_file_types();
+                } else if show_flow {
+                    self.open_flow();
                 }
                 Ok(())
             }
@@ -1452,12 +1591,22 @@ impl App {
         self.store.record_session(&summary)?;
         session.tree.refresh_rows(&session.progress);
         if completed {
+            let next = session.flow.as_ref().and_then(|order| {
+                let step = order.next_step(&session.progress)?;
+                Some(NextStep {
+                    index: order.step_number(&step.path)?,
+                    total: order.reachable_total(),
+                    path: step.path.clone(),
+                    via: step.via.clone(),
+                })
+            });
             session.result = Some(ResultView {
                 repo: session.repo.display_name.clone(),
                 path: typing_path,
                 completed,
                 metrics,
                 file_done,
+                next,
             });
             self.place = Place::Result;
         } else {
@@ -1514,8 +1663,11 @@ fn load_session(
                 Some(name),
                 DependencySettings {
                     import_edges,
-                    mode: cfg.user.progress.mode,
+                    mode: ProgressMode::Manual,
                     direction: cfg.user.progress.dependency_direction,
+                    entry: None,
+                    manifest_hints: Vec::new(),
+                    show_flow_overlay: false,
                 },
                 DisplaySettings {
                     hide_skipped: cfg.user.progress.hide_skipped,
@@ -1550,6 +1702,10 @@ fn load_session(
     )?;
     let hidden = hidden_paths(&progress, &saved_prefs);
     let import_edges = scan.import_edges.clone();
+    let (saved_mode, saved_entry) = store.load_repo_flow_prefs(repo_id)?;
+    let show_flow_overlay = saved_mode.is_none();
+    let mode = saved_mode.unwrap_or(cfg.user.progress.mode);
+    let manifest_hints = crate::scan::manifest::read_entry_hints(&progress_repo.root);
     Ok(RepoSession::from_parts(
         progress_repo,
         repo_id,
@@ -1557,8 +1713,11 @@ fn load_session(
         single_file,
         DependencySettings {
             import_edges,
-            mode: cfg.user.progress.mode,
+            mode,
             direction: cfg.user.progress.dependency_direction,
+            entry: saved_entry,
+            manifest_hints,
+            show_flow_overlay,
         },
         DisplaySettings {
             hide_skipped: cfg.user.progress.hide_skipped,
@@ -1593,30 +1752,53 @@ impl RepoSession {
         dependency: DependencySettings,
         display: DisplaySettings,
     ) -> Self {
-        let dependency_mode = uses_dependency_mode(dependency.mode)
+        let typeable_paths = typeable_paths(&progress);
+        let candidates = detect_entry_candidates(
+            &typeable_paths,
+            &dependency.import_edges,
+            &dependency.manifest_hints,
+        );
+        let mut entry_message = None;
+        let saved_entry = dependency.entry.clone();
+        let entry = saved_entry
+            .as_ref()
+            .filter(|path| typeable_paths.iter().any(|item| item == *path))
+            .cloned()
+            .or_else(|| {
+                if saved_entry.is_some() {
+                    entry_message =
+                        Some("saved entry is no longer typeable; using detected entry".into());
+                }
+                candidates.first().map(|candidate| candidate.path.clone())
+            });
+        let flow_active = uses_flow_mode(dependency.mode)
             && !dependency.import_edges.is_empty()
-            && progress
-                .files
-                .iter()
-                .filter(|file| file.derive_status() != FileStatus::Skipped)
-                .count()
-                > 1;
-        let ordered_paths = dependency_mode.then(|| {
-            dependency_order(
-                &progress,
+            && typeable_paths.len() > 1;
+        let flow = flow_active.then(|| {
+            let steps = order_files(
                 &dependency.import_edges,
+                entry.as_deref(),
                 dependency.direction,
-                None,
+                &typeable_paths,
+            );
+            FlowOrder::new(
+                entry
+                    .clone()
+                    .unwrap_or_else(|| typeable_paths.first().cloned().unwrap_or_default()),
+                steps,
             )
         });
         let show_file_types_overlay = display.show_file_types_overlay;
-        let tree = TreeView::from_progress_full(
+        let mut tree = TreeView::from_progress_full(
             &repo.display_name,
             &progress,
             display.hide_skipped,
-            ordered_paths.clone(),
+            flow.clone(),
             display.hidden_paths,
         );
+        if let Some(message) = entry_message {
+            tree.message = Some(message);
+        }
         Self {
             repo,
             repo_id,
@@ -1634,59 +1816,50 @@ impl RepoSession {
             single_file,
             import_edges: dependency.import_edges,
             dependency_direction: dependency.direction,
-            dependency_mode,
-            entry_override: None,
-            ordered_paths,
+            progress_mode: dependency.mode,
+            entry,
+            flow,
+            manifest_hints: dependency.manifest_hints,
             show_file_types_overlay,
+            show_flow_overlay: dependency.show_flow_overlay,
         }
     }
 
-    fn recompute_dependency_order(&mut self) {
-        let order = if self.dependency_mode {
-            Some(dependency_order(
-                &self.progress,
+    fn recompute_flow(&mut self) {
+        let typeable_paths = typeable_paths(&self.progress);
+        let flow_active = uses_flow_mode(self.progress_mode)
+            && !self.import_edges.is_empty()
+            && typeable_paths.len() > 1;
+        self.flow = if flow_active {
+            let steps = order_files(
                 &self.import_edges,
+                self.entry.as_deref(),
                 self.dependency_direction,
-                self.entry_override.as_deref(),
+                &typeable_paths,
+            );
+            Some(FlowOrder::new(
+                self.entry
+                    .clone()
+                    .unwrap_or_else(|| typeable_paths.first().cloned().unwrap_or_default()),
+                steps,
             ))
         } else {
             None
         };
-        self.ordered_paths = order.clone();
-        self.tree.set_dependency_order(&self.progress, order);
+        self.tree.set_flow(&self.progress, self.flow.clone());
     }
 }
 
-fn dependency_order(
-    progress: &RepoProgress,
-    edges: &[(String, String)],
-    direction: DependencyDirection,
-    entry_override: Option<&str>,
-) -> Vec<String> {
-    let mut typeable_paths: Vec<String> = progress
+fn typeable_paths(progress: &RepoProgress) -> Vec<String> {
+    let mut paths: Vec<String> = progress
         .files
         .iter()
         .filter(|file| file.derive_status() != FileStatus::Skipped)
         .map(|file| file.relative_path.clone())
         .collect();
-    typeable_paths.sort();
-    typeable_paths.dedup();
-
-    let entry = entry_override.or_else(|| most_imported_path(edges, &typeable_paths));
-    order_files(edges, entry, direction, &typeable_paths)
-}
-
-fn most_imported_path<'a>(edges: &[(String, String)], paths: &'a [String]) -> Option<&'a str> {
-    let mut best: Option<&String> = None;
-    let mut best_count = 0usize;
-    for path in paths {
-        let count = edges.iter().filter(|(_, target)| target == path).count();
-        if count > best_count {
-            best = Some(path);
-            best_count = count;
-        }
-    }
-    best.map(String::as_str)
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn now_millis() -> u64 {
@@ -1721,9 +1894,12 @@ pub mod headless {
                 config_path: cache.join("test-config.toml"),
             },
         )?;
-        // First-ever open shows the File types overlay; accept the defaults so
-        // callers that are not exercising that overlay see a plain Tree.
+        // First-ever open shows File types then the flow dialog; accept the
+        // defaults so callers that are not exercising those overlays see Tree.
         if overlay_name(&app) == Some("file_types") {
+            press(&mut app, KeyCode::Esc)?;
+        }
+        if overlay_name(&app) == Some("flow") {
             press(&mut app, KeyCode::Esc)?;
         }
         Ok(app)
@@ -1745,6 +1921,7 @@ pub mod headless {
             Some(Overlay::Stats) => Some("stats"),
             Some(Overlay::Pause) => Some("pause"),
             Some(Overlay::FileTypes) => Some("file_types"),
+            Some(Overlay::Flow) => Some("flow"),
             None => None,
         }
     }
@@ -1769,12 +1946,36 @@ pub mod headless {
         app.handle_key(KeyEvent::new(code, modifiers))
     }
 
+    pub fn recommend_path(app: &App) -> Option<String> {
+        app.session.as_ref().and_then(|s| s.tree.recommend.clone())
+    }
+
+    pub fn flow_paths(app: &App) -> Option<Vec<String>> {
+        app.session.as_ref().and_then(|s| {
+            s.flow
+                .as_ref()
+                .map(|order| order.steps.iter().map(|step| step.path.clone()).collect())
+        })
+    }
+
+    pub fn flow_entry(app: &App) -> Option<String> {
+        app.session
+            .as_ref()
+            .and_then(|s| s.entry.clone())
+            .or_else(|| {
+                app.session
+                    .as_ref()
+                    .and_then(|s| s.flow.as_ref().map(|order| order.entry.clone()))
+            })
+    }
+
     pub fn complete_recommended(app: &mut App) -> crate::Result<TypingMetrics> {
         let path = app
-            .progress()
-            .recommend_path()
-            .ok_or(Error::NoChunks)?
-            .to_string();
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.recommend.clone())
+            .or_else(|| app.progress().recommend_path().map(str::to_string))
+            .ok_or(Error::NoChunks)?;
         app.start_file(&path, 0)?;
         if app
             .session
@@ -2245,6 +2446,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(headless::overlay_name(&app), Some("file_types"));
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("flow"));
         headless::press(&mut app, KeyCode::Esc).unwrap();
         assert_eq!(headless::overlay_name(&app), None);
 

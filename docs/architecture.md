@@ -23,20 +23,22 @@ src/
   main.rs              CLI起動と終了コード
   cli.rs               引数の定義と検証
   app/                 画面遷移とユースケース
-  domain/
-    content.rs         正規化済み本文、ファイル単位、対象外理由
-    dependency.rs      依存グラフからの純粋な打鍵順序計算
-    typing.rs          I/O非依存の打鍵状態機械と計測
-    progress.rs        行数ベース進捗集計の純粋ロジック
+    domain/
+      content.rs         正規化済み本文、ファイル単位、対象外理由、ImportEdge
+      dependency.rs      依存グラフからの純粋な打鍵順序計算
+      entry.rs           エントリポイント候補の検出
+      typing.rs          I/O非依存の打鍵状態機械と計測
+      progress.rs        行数ベース進捗集計の純粋ロジック
   source/
     local.rs           ローカルパスの解決
     git.rs             clone、キャッシュ、refresh
-  scan/
-    walk.rs            ファイル走査と自動除外
-    extract.rs         正規化とファイル本文抽出
-    language.rs        拡張子からの言語判定
-    label.rs           行ラベルと設定フィルタ
-    deps/              リポジトリ内importの抽出・解決
+    scan/
+      walk.rs            ファイル走査と自動除外
+      extract.rs         正規化とファイル本文抽出
+      language.rs        拡張子からの言語判定
+      label.rs           行ラベルと設定フィルタ
+      manifest.rs        Cargo.toml / package.json からのエントリヒント
+      deps/              リポジトリ内importの抽出・解決
   store/
     sqlite.rs          スキーマ、進捗・セッション保存
   ui/
@@ -46,6 +48,7 @@ src/
     splash.rs          引数あり起動時のスプラッシュ
     stats.rs           達成サマリ画面
     tree.rs            ファイルツリー
+    flow.rs            進め方ダイアログ
     typing.rs          写経画面
     result.rs          リザルト画面
     fx.rs              カーソル移動とブレイズ軌跡の演出状態機械
@@ -93,8 +96,8 @@ Store  ──► Domain
 - `TypingEngine`: コマンドと時刻を受け、描画可能なスナップショットを返す。
 - `ProgressStore`: リポジトリ、ファイル、ファイル本文、セッションを保存・復元する。
 - `App`: 場所（Home / Tree / Typing / Result）とオーバーレイ（Help / Search /
-  Settings / Stats / Pause）の遷移とユースケースを所有する。チャンク一覧画面は
-  持たない。リポジトリ未ロード時はHome系画面のみを表示する。
+  Settings / Stats / Pause / File types / Flow）の遷移とユースケースを所有する。
+  チャンク一覧画面は持たない。リポジトリ未ロード時はHome系画面のみを表示する。
 
 打鍵エンジンへの入力は、文字、Enter、Backspace、Escape、時間更新へ正規化します。
 エンジンは受理位置、期待文字、ミス表示期限、完了・中断状態、計測値を返します。

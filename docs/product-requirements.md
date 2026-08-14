@@ -41,8 +41,8 @@
   Treeへの中断やアプリ終了ではセッションを確定せず、保存したチェックポイントから続ける。
 - **進行モード**: 次に打つファイルを決める戦略。進捗自体はモードに依存しない。
 - **場所（Place）**: Home、Tree、Typing、Result。縦1本の階層。Escで1つ戻る。
-- **オーバーレイ（Overlay）**: Help、Search、Settings、Stats、Pause。場所の上に
-  開き、閉じると必ず元の場所へ戻る。
+- **オーバーレイ（Overlay）**: Help、Search、Settings、Stats、Pause、File types、
+  Flow。場所の上に開き、閉じると必ず元の場所へ戻る。
 
 ## 3. 打鍵
 
@@ -210,29 +210,50 @@ import・コメントノードの利用可否を検証します。
 自動で別ファイルへ移動せず、Resultを表示します。ResultのEnterで次のおすすめを
 開始でき、Esc/`t`でTreeへ戻ります。
 
-### 8.2 dependency
+### 8.2 flow
 
-検出または手動選択したエントリポイントから、リポジトリ内部のimportを辿ります。
-将来の初期実装対象はRust、TypeScript / JavaScript、Pythonとし、未対応言語は
-manualへフォールバックします。
+検出したエントリポイントから、リポジトリ内部のimportを辿って次に打つファイルを
+決めます。対応言語はRust、TypeScript / JavaScript、Pythonです。import辺が空、
+またはエントリ候補がゼロならmanualへフォールバックします。
 
 - 既定はtop-down DFSとする。
-- 兄弟はソース内のimport出現順とする。
+- 兄弟は、本文で束縛名が最初に使われた行の順とする。未使用（`pub mod` だけの
+  宣言など）は宣言行の順に落ちる。
 - bottom-upを設定可能にする。
 - 循環は訪問済みファイルで打ち切る。
 - 到達不能な対象ファイルを末尾へパス順で追加する。
 - 順番は保存せず、依存関係から毎回計算する。
 
-候補が複数なら最も多くimportされるファイルを既定の起点とします。ツリーの`e`で
-明示的な起点を指定できます。Prepare画面は置かない（D-016）。
+エントリは次の優先度で自動検出します。先頭が既定です。対象ファイルに無いパスは
+候補から落とします。
+
+1. マニフェスト由来（`Cargo.toml` の `[[bin]] path` / `src/main.rs`、
+   `package.json` の `"main"` / `"bin"`）
+2. 実行入口: `src/main.rs`、`src/bin/*.rs`、`main.go`、`cmd/**/main.go`、
+   `__main__.py`、`main.py`、`manage.py`、`app.py`
+3. アプリ入口: `src/index.{ts,tsx,js,jsx}`、`src/main.{ts,tsx,js,jsx}`、
+   ルート `index.*`、`app/page.tsx`、`pages/index.*`
+4. ライブラリ根: `src/lib.rs`、`lib.rs`、`src/mod.rs`
+5. グラフ推定: 被import数0かつ到達可能ファイル数が最大（同点はパス浅い順→辞書順）
+
+モードとエントリはリポジトリ単位でSQLiteに保存します。未設定のリポジトリを開くと、
+File typesの直後に進め方ダイアログを出します。2回目以降はTreeの`e`で同じダイアログ
+を開きます。保存済みエントリが対象外になっていたら自動検出へフォールバックし、
+Treeに1行メッセージを出します。
+
+Treeはパス順のまま並べ、flowの順序は行頭の番号と`Tab`（おすすめへジャンプ）で
+辿ります。flow bar（`flow · entry <path> · done/total done`）、選択行の由来
+（`← importer:line  import文` / `entry point` / 到達不能）、次ファイルの
+`▸ next` を重ねます。ファイル完走後のResultには次ファイルと由来を出し、Enterは
+従来どおりおすすめ（flow順の次）を開始します。ファイル途中で別ファイルへは飛びません。
 
 ## 9. 画面と遷移
 
 画面は場所とオーバーレイの2層で構成します（D-022）。
 
 - **場所**: Home → Tree → Typing → Result。縦1本の階層。
-- **オーバーレイ**: Help、Search、Settings、Stats、Pause。どの場所からでも開き、
-  閉じると必ず元の場所へ戻る。場所は変わらない。
+- **オーバーレイ**: Help、Search、Settings、Stats、Pause、File types、Flow。どの
+  場所からでも開き、閉じると必ず元の場所へ戻る。場所は変わらない。
 
 Splashは場所ではなく、引数あり起動時の演出です。任意キーでスキップし、`q`や
 `Esc`でも終了せずスキップに倒します。Prepare画面は置きません。走査中の進捗
@@ -265,7 +286,7 @@ Homeの`s`（検索）と`c`（設定）はエイリアスとして残します�
 **Tree**
 
 ファイル状態、対象外理由、行数進捗、変更状態、ディレクトリ進捗、おすすめ、
-dependency時の順番号を表示します。ツリーは表示行の一次元ベクタへ展開し、
+flow時の順番号と由来を表示します。ツリーは表示行の一次元ベクタへ展開し、
 可視範囲だけを描画します。ディレクトリとファイルの進捗は
 `[進捗行数/対象行数 lines]`の形式で示します。途中ファイルは受理済み改行までを進捗行数とし、
 完走したファイルだけが`done`になります。
@@ -279,7 +300,7 @@ dependency時の順番号を表示します。ツリーは表示行の一次元�
 - `/`で絞り込み、`n`/`N`で前後の一致へ移動し、`Esc`で解除する。
 - `x`で写経対象をトグルする。ディレクトリなら配下を一括トグルする。
 - `X`で手動上書きを解除し、自動判定へ戻す。
-- `e`はdependencyモード時のみ、選択中の写経対象ファイルをentryに指定する。
+- `e`で進め方ダイアログを開く（モードとエントリの変更）。
 - `t`でFile typesオーバーレイ（§5.1、§9.3）を開く。
 
 **Typing**
@@ -349,7 +370,15 @@ Typingの`Esc`（Pause）と同様、Treeを背景に残したままの中央ダ
 **Help**
 
 現在の場所のキー、共通キー、記号凡例を表示します。凡例は`✓ done`、`○ todo`、
-`· skipped`、`[done/total lines]`、`▸ recommend`、dependency順の番号です。
+`· skipped`、`[done/total lines]`、`▸ recommend` / `▸ next`、`—`（flow外）、
+flow順の番号です。
+
+**Flow**（Treeの`e`、初回はFile typesの直後。§8.2）
+
+Treeを背景に残したままの中央ダイアログとして、進行モード（flow / manual）と
+エントリ候補を1リストで選ばせる。`j`/`k`で移動、`Enter`/`Space`で行を選択、
+`Esc`/`q`/`e`で適用して閉じる。import辺が空ならflow行を無効化しmanualを選ぶ。
+候補末尾に「ツリーで選択中」を足し、検出漏れのファイルも起点にできる。
 
 ### 9.4 表示
 
@@ -420,6 +449,10 @@ preset = "classic"
 
 `typing.syntax_highlight` はTyping画面の構文色を切り替えます。既定値は`true`で、
 無効にしても打鍵判定、進捗、演出には影響しません。
+
+`progress.mode` は、リポジトリ初回の進め方ダイアログにおける既定選択です。
+実際の進行モードとエントリはリポジトリ単位でSQLiteに保存します（§8.2）。
+`mode = "dependency"` は読み込み時に `flow` として扱います。
 
 不正な設定値は無視せず、修正方法が分かるエラーを表示します。
 

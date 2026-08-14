@@ -7,7 +7,16 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::domain::content::TypingMetrics;
+use crate::domain::dependency::FlowVia;
 use crate::ui::theme;
+
+#[derive(Debug, Clone)]
+pub struct NextStep {
+    pub index: usize,
+    pub total: usize,
+    pub path: String,
+    pub via: Option<FlowVia>,
+}
 
 #[derive(Debug, Clone)]
 pub struct ResultView {
@@ -16,13 +25,15 @@ pub struct ResultView {
     pub completed: bool,
     pub metrics: TypingMetrics,
     pub file_done: bool,
+    pub next: Option<NextStep>,
 }
 
 pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
     theme::fill_background(frame, area);
 
     let card_width = (view.path.chars().count() as u16 + 8).clamp(46, area.width);
-    let card = theme::centered_rect(area, card_width, 15);
+    let extra = if view.next.is_some() { 5 } else { 0 };
+    let card = theme::centered_rect(area, card_width, 15 + extra);
     let title = if view.repo.is_empty() {
         view.path.clone()
     } else {
@@ -52,7 +63,7 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
         ])
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             headline,
@@ -72,6 +83,34 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
         metric("misses", format!("{}", m.misses)),
         metric("time", format!("{:.1}s", m.elapsed_ms as f64 / 1000.0)),
         Line::from(""),
+    ];
+    if let Some(next) = &view.next {
+        lines.push(
+            Line::from(Span::styled(
+                format!("── next  {}/{} ──────────────", next.index, next.total),
+                Style::default().fg(theme::MUTED),
+            ))
+            .alignment(Alignment::Center),
+        );
+        lines.push(
+            Line::from(Span::styled(
+                next.path.clone(),
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+        );
+        if let Some(via) = &next.via {
+            lines.push(
+                Line::from(Span::styled(
+                    format!("← {}:{}  {}", via.importer, via.line, via.raw),
+                    Style::default().fg(theme::MUTED),
+                ))
+                .alignment(Alignment::Center),
+            );
+        }
+        lines.push(Line::from(""));
+    }
+    lines.push(
         theme::key_hints(&[
             ("Enter", "next"),
             ("r", "retry"),
@@ -79,6 +118,6 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
             ("?", "help"),
         ])
         .alignment(Alignment::Center),
-    ];
+    );
     frame.render_widget(Paragraph::new(lines), inner);
 }

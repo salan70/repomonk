@@ -1,4 +1,5 @@
 pub mod file_types;
+pub mod flow;
 pub mod fx;
 pub mod help;
 pub mod highlight;

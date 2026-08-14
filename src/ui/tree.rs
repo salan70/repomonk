@@ -7,6 +7,7 @@ use ratatui::widgets::{Gauge, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::domain::content::{FileStatus, RepoProgress};
+use crate::domain::dependency::FlowOrder;
 use crate::domain::progress::directory_progress;
 use crate::ui::theme;
 
@@ -37,8 +38,10 @@ pub struct TreeView {
     pub recommend: Option<String>,
     pub title: String,
     pub collapsed: std::collections::HashSet<String>,
-    /// Dependency traversal order, when dependency mode is active.
-    pub dependency_order: Option<Vec<String>>,
+    /// Flow traversal order, when flow mode is active.
+    pub flow: Option<FlowOrder>,
+    /// Reachable `(done, total)` file counts for the flow bar.
+    pub flow_counts: Option<(usize, usize)>,
     /// Repository-wide `(completed, total)` normalized line counts.
     pub overall: (usize, usize),
     pub hide_skipped: bool,
@@ -65,13 +68,13 @@ impl TreeView {
         repo_name: &str,
         progress: &RepoProgress,
         hide_skipped: bool,
-        dependency_order: Option<Vec<String>>,
+        flow: Option<FlowOrder>,
     ) -> Self {
         Self::from_progress_full(
             repo_name,
             progress,
             hide_skipped,
-            dependency_order,
+            flow,
             std::collections::HashSet::new(),
         )
     }
@@ -80,10 +83,13 @@ impl TreeView {
         repo_name: &str,
         progress: &RepoProgress,
         hide_skipped: bool,
-        dependency_order: Option<Vec<String>>,
+        flow: Option<FlowOrder>,
         hidden_paths: std::collections::HashSet<String>,
     ) -> Self {
-        let recommend = recommended_path(progress, dependency_order.as_deref());
+        let recommend = recommended_path(progress, flow.as_ref());
+        let flow_counts = flow
+            .as_ref()
+            .map(|order| (order.reachable_done(progress), order.reachable_total()));
         let rows = flatten(
             progress,
             &std::collections::HashSet::new(),
@@ -97,7 +103,8 @@ impl TreeView {
             recommend,
             title: repo_name.to_string(),
             collapsed: std::collections::HashSet::new(),
-            dependency_order,
+            flow,
+            flow_counts,
             overall: overall_progress(progress),
             hide_skipped,
             filter: String::new(),
@@ -110,7 +117,11 @@ impl TreeView {
     }
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
-        self.recommend = recommended_path(progress, self.dependency_order.as_deref());
+        self.recommend = recommended_path(progress, self.flow.as_ref());
+        self.flow_counts = self
+            .flow
+            .as_ref()
+            .map(|order| (order.reachable_done(progress), order.reachable_total()));
         self.overall = overall_progress(progress);
         let prev_path = self.selected_path();
         self.rows = flatten(
@@ -131,20 +142,13 @@ impl TreeView {
         }
     }
 
-    pub fn set_dependency_order(
-        &mut self,
-        progress: &RepoProgress,
-        dependency_order: Option<Vec<String>>,
-    ) {
-        self.dependency_order = dependency_order;
+    pub fn set_flow(&mut self, progress: &RepoProgress, flow: Option<FlowOrder>) {
+        self.flow = flow;
         self.refresh_rows(progress);
     }
 
-    pub fn dependency_order_number(&self, path: &str) -> Option<usize> {
-        self.dependency_order
-            .as_ref()
-            .and_then(|order| order.iter().position(|item| item == path))
-            .map(|index| index + 1)
+    pub fn flow_step_number(&self, path: &str) -> Option<usize> {
+        self.flow.as_ref().and_then(|order| order.step_number(path))
     }
 
     pub fn move_by(&mut self, delta: isize) {
@@ -311,19 +315,9 @@ fn overall_progress(progress: &RepoProgress) -> (usize, usize) {
     (root.completed_lines, root.total_lines)
 }
 
-fn recommended_path(
-    progress: &RepoProgress,
-    dependency_order: Option<&[String]>,
-) -> Option<String> {
-    if let Some(order) = dependency_order {
-        return order.iter().find_map(|path| {
-            progress
-                .files
-                .iter()
-                .find(|file| file.relative_path == *path)
-                .filter(|file| file.derive_status() == FileStatus::Todo)
-                .map(|_| path.clone())
-        });
+fn recommended_path(progress: &RepoProgress, flow: Option<&FlowOrder>) -> Option<String> {
+    if let Some(order) = flow {
+        return order.next_step(progress).map(|step| step.path.clone());
     }
     progress.recommend_path().map(str::to_string)
 }
@@ -472,27 +466,48 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let show_flow_bar = view.flow.is_some() && area.height >= 12;
     let filter_line = view.filter_editing || !view.filter.is_empty();
-    let second_line = filter_line || view.message.is_some();
+    let origin = if filter_line || view.message.is_some() {
+        None
+    } else {
+        selected_origin(view)
+    };
+    let info_line = filter_line || view.message.is_some() || origin.is_some();
+
+    let mut constraints = vec![Constraint::Length(1)];
+    if show_flow_bar {
+        constraints.push(Constraint::Length(1));
+    }
+    if info_line {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Min(1));
+    constraints.push(Constraint::Length(1));
     let panes = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if second_line {
-            vec![
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ]
-        } else {
-            vec![
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ]
-        })
+        .constraints(constraints)
         .split(inner);
-    let list_pane = if second_line { panes[2] } else { panes[1] };
-    let footer_pane = if second_line { panes[3] } else { panes[2] };
+
+    let mut pane_idx = 0usize;
+    let gauge_pane = panes[pane_idx];
+    pane_idx += 1;
+    let flow_pane = if show_flow_bar {
+        let pane = panes[pane_idx];
+        pane_idx += 1;
+        Some(pane)
+    } else {
+        None
+    };
+    let info_pane = if info_line {
+        let pane = panes[pane_idx];
+        pane_idx += 1;
+        Some(pane)
+    } else {
+        None
+    };
+    let list_pane = panes[pane_idx];
+    let footer_pane = panes[pane_idx + 1];
 
     // Header: repository-wide progress gauge.
     let (completed, total) = view.overall;
@@ -514,36 +529,58 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ));
     let gauge_area = Rect {
-        x: panes[0].x + 1,
-        y: panes[0].y,
-        width: panes[0].width.saturating_sub(2),
-        height: panes[0].height,
+        x: gauge_pane.x + 1,
+        y: gauge_pane.y,
+        width: gauge_pane.width.saturating_sub(2),
+        height: gauge_pane.height,
     };
     frame.render_widget(gauge, gauge_area);
 
-    if filter_line {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" /", Style::default().fg(theme::CYAN)),
-                Span::styled(
-                    view.filter.clone(),
-                    Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    if view.filter_editing { "▌" } else { "" },
-                    Style::default().fg(theme::CYAN),
-                ),
-            ])),
-            panes[1],
-        );
-    } else if let Some(message) = &view.message {
+    if let (Some(pane), Some(flow), Some((done, total))) =
+        (flow_pane, view.flow.as_ref(), view.flow_counts)
+    {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!(" {message}"),
-                Style::default().fg(theme::MUTED),
+                format!(" flow · entry {} · {done}/{total} done", flow.entry),
+                Style::default().fg(theme::CYAN),
             ))),
-            panes[1],
+            pane,
         );
+    }
+
+    if let Some(pane) = info_pane {
+        if filter_line {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" /", Style::default().fg(theme::CYAN)),
+                    Span::styled(
+                        view.filter.clone(),
+                        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        if view.filter_editing { "▌" } else { "" },
+                        Style::default().fg(theme::CYAN),
+                    ),
+                ])),
+                pane,
+            );
+        } else if let Some(message) = &view.message {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {message}"),
+                    Style::default().fg(theme::MUTED),
+                ))),
+                pane,
+            );
+        } else if let Some(origin) = origin {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {origin}"),
+                    Style::default().fg(theme::MUTED),
+                ))),
+                pane,
+            );
+        }
     }
 
     // Body: tree rows.
@@ -568,13 +605,28 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         &[
             ("Enter", "open"),
             ("j/k", "move"),
-            ("Tab", "recommend"),
-            ("t", "file types"),
-            ("Esc", "back"),
+            ("Tab", "next"),
+            ("e", "flow"),
+            ("t", "types"),
             ("?", "help"),
         ][..]
     };
     frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer_pane);
+}
+
+fn selected_origin(view: &TreeView) -> Option<String> {
+    let flow = view.flow.as_ref()?;
+    let path = view.selected_file_path()?;
+    if path == flow.entry {
+        return Some("entry point".into());
+    }
+    if let Some(via) = flow.via(&path) {
+        return Some(format!("← {}:{}  {}", via.importer, via.line, via.raw));
+    }
+    match flow.is_reachable(&path) {
+        Some(true) => Some("entry point".into()),
+        Some(false) | None => Some("outside flow (unreachable from entry)".into()),
+    }
 }
 
 fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
@@ -606,11 +658,24 @@ fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
             }
         }
         TreeRowKind::File { path } => {
-            if let Some(number) = view.dependency_order_number(path) {
-                spans.push(Span::styled(
-                    format!("{number:>3} "),
-                    Style::default().fg(theme::CYAN),
-                ));
+            if view.flow.is_some() {
+                if let Some(number) = view.flow_step_number(path) {
+                    let status = row.status.unwrap_or(FileStatus::Todo);
+                    let color = if status == FileStatus::Done {
+                        theme::GREEN
+                    } else {
+                        theme::CYAN
+                    };
+                    spans.push(Span::styled(
+                        format!("{number:>3} "),
+                        Style::default().fg(color),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        "  — ".to_string(),
+                        Style::default().fg(theme::MUTED),
+                    ));
+                }
             }
             let status = row.status.unwrap_or(FileStatus::Todo);
             let (mark, mark_color, name_color) = match status {
@@ -645,8 +710,13 @@ fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
                 ));
             }
             if view.recommend.as_deref() == Some(path.as_str()) {
+                let label = if view.flow.is_some() {
+                    "  ▸ next"
+                } else {
+                    "  ▸ recommend"
+                };
                 spans.push(Span::styled(
-                    "  ▸ recommend",
+                    label.to_string(),
                     Style::default()
                         .fg(theme::CYAN)
                         .add_modifier(Modifier::BOLD),
