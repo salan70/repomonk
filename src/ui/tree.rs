@@ -160,10 +160,7 @@ impl TreeView {
         let mut next = (self.selected as isize + delta).rem_euclid(len);
 
         for _ in 0..self.rows.len() {
-            if self.rows[next as usize]
-                .status
-                .is_some_and(|status| status != FileStatus::Skipped)
-            {
+            if self.rows[next as usize].status != Some(FileStatus::Skipped) {
                 self.selected = next as usize;
                 return;
             }
@@ -815,20 +812,37 @@ mod tests {
     }
 
     #[test]
-    fn vertical_movement_selects_only_enabled_files() {
+    fn vertical_movement_selects_directories_and_enabled_files() {
         let mut progress = progress();
         progress.files[1].manual_override = Some(crate::domain::content::ManualOverride::Skip);
         let mut tree = TreeView::from_progress("demo", &progress, false);
 
         assert!(tree.jump_to_path("src/a.rs"));
         tree.move_by(-1);
+        assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
+
+        tree.move_by(-1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("lib.rs"));
+
+        tree.move_by(1);
+        assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
 
         tree.move_by(1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
 
         tree.move_by(1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("lib.rs"));
+    }
+
+    #[test]
+    fn move_by_stops_on_directories() {
+        let progress = progress();
+        let mut tree = TreeView::from_progress("demo", &progress, false);
+        assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
+        tree.move_by(1);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+        tree.move_by(-1);
+        assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
     }
 
     #[test]

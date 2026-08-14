@@ -2286,6 +2286,12 @@ mod tests {
         )
         .unwrap();
 
+        let start = app
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.selected_path())
+            .unwrap();
+
         app.handle_key_event(KeyEvent::new_with_kind(
             KeyCode::Char('j'),
             KeyModifiers::NONE,
@@ -2295,8 +2301,9 @@ mod tests {
         let first = app
             .session
             .as_ref()
-            .and_then(|s| s.tree.selected_file_path())
+            .and_then(|s| s.tree.selected_path())
             .unwrap();
+        assert_ne!(first, start);
 
         app.handle_key_event(KeyEvent::new_with_kind(
             KeyCode::Char('j'),
@@ -2307,7 +2314,7 @@ mod tests {
         let second = app
             .session
             .as_ref()
-            .and_then(|s| s.tree.selected_file_path())
+            .and_then(|s| s.tree.selected_path())
             .unwrap();
         assert_ne!(second, first);
 
@@ -2320,7 +2327,7 @@ mod tests {
         assert_eq!(
             app.session
                 .as_ref()
-                .and_then(|s| s.tree.selected_file_path())
+                .and_then(|s| s.tree.selected_path())
                 .as_deref(),
             Some(first.as_str())
         );
