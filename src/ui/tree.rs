@@ -625,6 +625,13 @@ fn filter_rows(rows: Vec<TreeRow>, filter: &str) -> Vec<TreeRow> {
         .collect()
 }
 
+/// Inner list height for a Tree screen of `area`.
+///
+/// Subtracts 4 chrome rows (header, Next, detail, footer) and 2 border rows.
+pub fn list_height(area: Rect) -> usize {
+    area.height.saturating_sub(4 + 2) as usize
+}
+
 pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     theme::fill_background(frame, area);
     let block = theme::bordered_block(theme::title_line(&view.title));
@@ -1103,6 +1110,13 @@ mod tests {
             "swift-scanner/…/SpecLinkSwiftScanner"
         );
         assert_eq!(elide_dir_name("src/cli", 20), "src/cli");
+    }
+
+    #[test]
+    fn list_height_subtracts_chrome_and_borders() {
+        assert_eq!(list_height(Rect::new(0, 0, 80, 24)), 18);
+        assert_eq!(list_height(Rect::new(0, 0, 80, 6)), 0);
+        assert_eq!(list_height(Rect::new(0, 0, 80, 10)), 4);
     }
 
     #[test]

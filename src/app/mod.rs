@@ -34,7 +34,7 @@ use crate::ui::settings::{draw_settings, SettingKind, SettingsView};
 use crate::ui::splash::{draw_splash, looping_logo_elapsed, SPLASH_TOTAL_MS};
 use crate::ui::stats::{draw_stats, StatsView};
 use crate::ui::terminal::TerminalGuard;
-use crate::ui::tree::{draw_tree, TreeView};
+use crate::ui::tree::{draw_tree, list_height, TreeView};
 use crate::ui::typing::draw_typing;
 use crate::Error;
 
@@ -219,7 +219,15 @@ impl App {
             let now_ms = now_millis();
             if self.place == Place::Tree {
                 if let Some(s) = &mut self.session {
-                    s.tree.visible_rows = 12;
+                    if let Ok(size) = guard.terminal().size() {
+                        s.tree.visible_rows = list_height(ratatui::layout::Rect {
+                            x: 0,
+                            y: 0,
+                            width: size.width,
+                            height: size.height,
+                        })
+                        .max(1);
+                    }
                 }
             }
             let typing_snap = if self.place == Place::Typing {
