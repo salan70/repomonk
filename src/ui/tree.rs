@@ -71,13 +71,7 @@ impl TreeView {
         let flow_counts = flow
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
-        let expanded = flatten(
-            progress,
-            &std::collections::HashSet::new(),
-            hide_skipped,
-            &hidden_paths,
-            "",
-        );
+        let expanded = compress_chains(flatten(progress, hide_skipped, &hidden_paths));
         let mut collapsed: std::collections::HashSet<String> = expanded
             .iter()
             .filter_map(|row| match &row.kind {
@@ -92,7 +86,7 @@ impl TreeView {
                 current = parent;
             }
         }
-        let rows = flatten(progress, &collapsed, hide_skipped, &hidden_paths, "");
+        let rows = apply_collapse(expanded, &collapsed);
         let mut view = Self {
             rows,
             selected: 0,
@@ -122,7 +116,7 @@ impl TreeView {
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
         self.overall = overall_progress(progress);
         let prev_path = self.selected_path();
-        self.rows = flatten(
+        self.rows = visible_rows(
             progress,
             &self.collapsed,
             self.hide_skipped,
@@ -281,12 +275,17 @@ impl TreeView {
     }
 
     fn jump_dir(&mut self, path: &str) {
-        if let Some(idx) = self
-            .rows
-            .iter()
-            .position(|r| matches!(&r.kind, TreeRowKind::Dir { path: p } if p == path))
-        {
-            self.selected = idx;
+        let mut current = Some(path.to_string());
+        while let Some(p) = current {
+            if let Some(idx) = self
+                .rows
+                .iter()
+                .position(|r| matches!(&r.kind, TreeRowKind::Dir { path: dp } if dp == &p))
+            {
+                self.selected = idx;
+                return;
+            }
+            current = parent_path(&p);
         }
     }
 
@@ -327,40 +326,25 @@ fn parent_path(path: &str) -> Option<String> {
     path.rsplit_once('/').map(|(parent, _)| parent.to_string())
 }
 
-fn flatten(
+fn visible_rows(
     progress: &RepoProgress,
     collapsed: &std::collections::HashSet<String>,
     hide_skipped: bool,
     hidden_paths: &std::collections::HashSet<String>,
     filter: &str,
 ) -> Vec<TreeRow> {
-    let mut rows = Vec::new();
-    // Build a simple path-sorted expansion.
-    let mut dirs: Vec<String> = Vec::new();
-    for f in &progress.files {
-        if hidden_paths.contains(&f.relative_path)
-            || (hide_skipped && f.derive_status() == FileStatus::Skipped)
-        {
-            continue;
-        }
-        let parts: Vec<&str> = f.relative_path.split('/').collect();
-        let mut acc = String::new();
-        for (i, part) in parts.iter().enumerate() {
-            if i + 1 == parts.len() {
-                break;
-            }
-            if !acc.is_empty() {
-                acc.push('/');
-            }
-            acc.push_str(part);
-            if !dirs.iter().any(|d| d == &acc) {
-                dirs.push(acc.clone());
-            }
-        }
-    }
-    dirs.sort();
+    let rows = flatten(progress, hide_skipped, hidden_paths);
+    let rows = compress_chains(rows);
+    let rows = apply_collapse(rows, collapsed);
+    filter_rows(rows, filter)
+}
 
-    // Emit via DFS on sorted unique paths.
+fn flatten(
+    progress: &RepoProgress,
+    hide_skipped: bool,
+    hidden_paths: &std::collections::HashSet<String>,
+) -> Vec<TreeRow> {
+    let mut rows = Vec::new();
     let mut emitted_dirs = std::collections::HashSet::new();
     for f in &progress.files {
         if hidden_paths.contains(&f.relative_path)
@@ -370,7 +354,6 @@ fn flatten(
         }
         let parts: Vec<&str> = f.relative_path.split('/').collect();
         let mut acc = String::new();
-        let mut hidden = false;
         for (i, part) in parts.iter().enumerate() {
             let is_file = i + 1 == parts.len();
             if !is_file {
@@ -378,9 +361,6 @@ fn flatten(
                     acc.push('/');
                 }
                 acc.push_str(part);
-                if hidden {
-                    continue;
-                }
                 if !emitted_dirs.contains(&acc) {
                     let dprog = directory_progress(progress, &acc);
                     rows.push(TreeRow {
@@ -393,10 +373,7 @@ fn flatten(
                     });
                     emitted_dirs.insert(acc.clone());
                 }
-                if collapsed.contains(&acc) {
-                    hidden = true;
-                }
-            } else if !hidden {
+            } else {
                 let status = f.derive_status();
                 let (progress_counts, skip_reason) = if status == FileStatus::Skipped {
                     (None, f.display_skip_reason())
@@ -416,7 +393,103 @@ fn flatten(
             }
         }
     }
-    filter_rows(rows, filter)
+    rows
+}
+
+fn compress_chains(mut rows: Vec<TreeRow>) -> Vec<TreeRow> {
+    loop {
+        let next = compress_once(&rows);
+        if next == rows {
+            return next;
+        }
+        rows = next;
+    }
+}
+
+fn compress_once(rows: &[TreeRow]) -> Vec<TreeRow> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut i = 0;
+    while i < rows.len() {
+        let row = &rows[i];
+        if matches!(row.kind, TreeRowKind::Dir { .. }) {
+            let mut end = i + 1;
+            while end < rows.len() && rows[end].depth > row.depth {
+                end += 1;
+            }
+            let children: Vec<usize> = (i + 1..end)
+                .filter(|&k| rows[k].depth == row.depth + 1)
+                .collect();
+            if children.len() == 1 {
+                let child_idx = children[0];
+                if let TreeRowKind::Dir { path: child_path } = &rows[child_idx].kind {
+                    let mut compressed = row.clone();
+                    compressed.name = format!("{}/{}", row.name, rows[child_idx].name);
+                    compressed.kind = TreeRowKind::Dir {
+                        path: child_path.clone(),
+                    };
+                    compressed.progress = rows[child_idx].progress;
+                    out.push(compressed);
+                    for desc in rows.iter().take(end).skip(child_idx + 1) {
+                        let mut lifted = desc.clone();
+                        lifted.depth = lifted.depth.saturating_sub(1);
+                        out.push(lifted);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+        }
+        out.push(row.clone());
+        i += 1;
+    }
+    out
+}
+
+fn apply_collapse(
+    rows: Vec<TreeRow>,
+    collapsed: &std::collections::HashSet<String>,
+) -> Vec<TreeRow> {
+    let mut out = Vec::new();
+    let mut hidden_until_depth: Option<usize> = None;
+    for row in rows {
+        if let Some(depth) = hidden_until_depth {
+            if row.depth > depth {
+                continue;
+            }
+            hidden_until_depth = None;
+        }
+        if let TreeRowKind::Dir { path } = &row.kind {
+            if collapsed.contains(path) {
+                hidden_until_depth = Some(row.depth);
+            }
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// Elide the middle of a compressed directory name when it exceeds `max` cells.
+fn elide_dir_name(name: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let char_len = name.chars().count();
+    if char_len <= max {
+        return name.to_string();
+    }
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() >= 3 {
+        let candidate = format!("{}/…/{}", parts[0], parts[parts.len() - 1]);
+        if candidate.chars().count() <= max {
+            return candidate;
+        }
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let chars: Vec<char> = name.chars().collect();
+    let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+    format!("…{tail}")
 }
 
 fn file_matches_filter(path: &str, name: &str, q: &str) -> bool {
@@ -582,7 +655,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     let items: Vec<ListItem> = view
         .rows
         .iter()
-        .map(|row| ListItem::new(row_line(row, view)))
+        .map(|row| ListItem::new(row_line(row, view, list_pane.width)))
         .collect();
 
     let mut state = ListState::default();
@@ -624,7 +697,7 @@ fn selected_origin(view: &TreeView) -> Option<String> {
     }
 }
 
-fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
+fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::raw(" ".repeat(1 + row.depth * 2)));
 
@@ -639,17 +712,21 @@ fn row_line(row: &TreeRow, view: &TreeView) -> Line<'static> {
                 arrow.to_string(),
                 Style::default().fg(theme::MUTED),
             ));
+            let suffix = row
+                .progress
+                .map(|(done, total)| format!("  [{done}/{total} lines]"))
+                .unwrap_or_default();
+            let used = 1 + row.depth * 2 + arrow.chars().count() + suffix.chars().count() + 1;
+            let budget = (width as usize).saturating_sub(used);
+            let name = elide_dir_name(&row.name, budget);
             spans.push(Span::styled(
-                format!("{}/", row.name),
+                format!("{name}/"),
                 Style::default()
                     .fg(theme::BLUE)
                     .add_modifier(Modifier::BOLD),
             ));
-            if let Some((done, total)) = row.progress {
-                spans.push(Span::styled(
-                    format!("  [{done}/{total} lines]"),
-                    Style::default().fg(theme::MUTED),
-                ));
+            if !suffix.is_empty() {
+                spans.push(Span::styled(suffix, Style::default().fg(theme::MUTED)));
             }
         }
         TreeRowKind::File { path } => {
@@ -896,5 +973,53 @@ mod tests {
         let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
         assert!(!names.contains(&"lib.rs"));
         assert!(names.contains(&"a.rs"));
+    }
+
+    #[test]
+    fn single_child_dir_chain_is_compressed() {
+        let progress = RepoProgress {
+            files: vec![file("a/b/c.rs", "c")],
+        };
+        let tree = tree_view(&progress, false);
+        let dirs: Vec<_> = tree
+            .rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                TreeRowKind::Dir { path } => Some((r.name.as_str(), path.as_str(), r.depth)),
+                TreeRowKind::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(dirs, vec![("a/b", "a/b", 0)]);
+        assert_eq!(tree.rows.len(), 2);
+        assert_eq!(tree.rows[1].depth, 1);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("a/b/c.rs"));
+    }
+
+    #[test]
+    fn collapse_or_parent_walks_up_to_existing_row() {
+        let progress = RepoProgress {
+            files: vec![file("src/a/b/c.rs", "c"), file("src/other.rs", "o")],
+        };
+        let mut tree = tree_view(&progress, false);
+        let idx = tree
+            .rows
+            .iter()
+            .position(|r| matches!(&r.kind, TreeRowKind::Dir { path } if path == "src/a/b"))
+            .expect("compressed src/a/b row");
+        tree.selected = idx;
+        tree.collapse_or_parent(&progress);
+        assert!(tree.collapsed.contains("src/a/b"));
+        assert_eq!(tree.selected_dir_path().as_deref(), Some("src/a/b"));
+        tree.collapse_or_parent(&progress);
+        assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
+    }
+
+    #[test]
+    fn elide_dir_name_keeps_first_and_last_segment() {
+        assert_eq!(
+            elide_dir_name("swift-scanner/pkg/SpecLinkSwiftScanner", 36),
+            "swift-scanner/…/SpecLinkSwiftScanner"
+        );
+        assert_eq!(elide_dir_name("src/cli", 20), "src/cli");
     }
 }
