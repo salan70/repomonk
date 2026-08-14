@@ -118,12 +118,20 @@ impl TreeView {
     }
 
     pub fn move_by(&mut self, delta: isize) {
-        if self.rows.is_empty() {
+        if self.rows.is_empty() || delta == 0 {
             return;
         }
         let len = self.rows.len() as isize;
-        let next = (self.selected as isize + delta).rem_euclid(len);
-        self.selected = next as usize;
+        let direction = delta.signum();
+        let mut next = (self.selected as isize + delta).rem_euclid(len);
+
+        for _ in 0..self.rows.len() {
+            if self.rows[next as usize].status != Some(FileStatus::Skipped) {
+                self.selected = next as usize;
+                return;
+            }
+            next = (next + direction).rem_euclid(len);
+        }
     }
 
     pub fn selected_file_path(&self) -> Option<String> {
@@ -655,6 +663,20 @@ mod tests {
         let mut tree = TreeView::from_progress("demo", &progress, false);
         tree.selected = tree.rows.len() - 1;
         assert!(tree.jump_recommend());
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn vertical_movement_skips_disabled_files_in_both_directions() {
+        let mut progress = progress();
+        progress.files[1].manual_override = Some(crate::domain::content::ManualOverride::Skip);
+        let mut tree = TreeView::from_progress("demo", &progress, false);
+
+        assert!(tree.jump_to_path("src/a.rs"));
+        tree.move_by(1);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("lib.rs"));
+
+        tree.move_by(-1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
     }
 }
