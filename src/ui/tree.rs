@@ -48,6 +48,10 @@ pub struct TreeView {
     pub flow_counts: Option<(usize, usize)>,
     /// Repository-wide `(completed, total)` normalized line counts.
     pub overall: (usize, usize),
+    /// Repository-wide `(done_files, typeable_files)`.
+    pub file_counts: (usize, usize),
+    /// Line count of the recommended file, for the Next row.
+    pub recommend_lines: Option<usize>,
     pub hide_skipped: bool,
     /// Incremental file filter (`/` on Tree).
     pub filter: String,
@@ -74,9 +78,17 @@ impl TreeView {
         hidden_paths: std::collections::HashSet<String>,
     ) -> Self {
         let recommend = recommended_path(progress, flow.as_ref());
+        let recommend_lines = recommend.as_ref().and_then(|path| {
+            progress
+                .files
+                .iter()
+                .find(|f| f.relative_path == *path)
+                .map(|f| f.total_lines())
+        });
         let flow_counts = flow
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
+        let root = directory_progress(progress, "");
         let expanded = compress_chains(flatten(progress, hide_skipped, &hidden_paths));
         let mut collapsed: std::collections::HashSet<String> = expanded
             .iter()
@@ -101,7 +113,9 @@ impl TreeView {
             collapsed,
             flow,
             flow_counts,
-            overall: overall_progress(progress),
+            overall: (root.completed_lines, root.total_lines),
+            file_counts: (root.done_files, root.done_files + root.todo_files),
+            recommend_lines,
             hide_skipped,
             filter: String::new(),
             filter_editing: false,
@@ -117,11 +131,20 @@ impl TreeView {
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
         self.recommend = recommended_path(progress, self.flow.as_ref());
+        self.recommend_lines = self.recommend.as_ref().and_then(|path| {
+            progress
+                .files
+                .iter()
+                .find(|f| f.relative_path == *path)
+                .map(|f| f.total_lines())
+        });
         self.flow_counts = self
             .flow
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
-        self.overall = overall_progress(progress);
+        let root = directory_progress(progress, "");
+        self.overall = (root.completed_lines, root.total_lines);
+        self.file_counts = (root.done_files, root.done_files + root.todo_files);
         self.excluded = excluded_count(progress, self.hide_skipped, &self.hidden_paths);
         let prev_path = self.selected_path();
         self.rows = visible_rows(
@@ -329,9 +352,49 @@ fn excluded_count(
         .count()
 }
 
-fn overall_progress(progress: &RepoProgress) -> (usize, usize) {
-    let root = directory_progress(progress, "");
-    (root.completed_lines, root.total_lines)
+fn header_label(view: &TreeView) -> String {
+    let (completed, total) = view.overall;
+    let ratio = if total == 0 {
+        0.0
+    } else {
+        completed as f64 / total as f64
+    };
+    let pct = format!("{:.0}%", ratio * 100.0);
+    if view.flow.is_some() {
+        let (done, files) = view.flow_counts.unwrap_or(view.file_counts);
+        format!("{pct}  ·  {done}/{files} files in flow")
+    } else {
+        let (done, files) = view.file_counts;
+        format!("{pct}  ·  {done}/{files} files")
+    }
+}
+
+fn next_line(view: &TreeView) -> Line<'static> {
+    match &view.recommend {
+        Some(path) => {
+            let text = if view.flow.is_some() {
+                if let Some(step) = view.flow_step_number(path) {
+                    format!(" ▸ Next  step {step} · {path} · Enter to start")
+                } else {
+                    format!(" ▸ Next  {path} · Enter to start")
+                }
+            } else {
+                let lines = view.recommend_lines.unwrap_or(0);
+                format!(" ▸ Next  {path} · {lines} lines · Enter to start")
+            };
+            Line::from(Span::styled(
+                text,
+                Style::default()
+                    .fg(theme::CYAN)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        }
+        None if view.repo_complete => Line::from(Span::styled(
+            " ✓ repo complete".to_string(),
+            Style::default().fg(theme::GREEN),
+        )),
+        None => Line::from(""),
+    }
 }
 
 fn recommended_path(progress: &RepoProgress, flow: Option<&FlowOrder>) -> Option<String> {
@@ -568,35 +631,24 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let show_flow_bar = view.flow.is_some() && area.height >= 12;
-
-    let mut constraints = vec![Constraint::Length(1)];
-    if show_flow_bar {
-        constraints.push(Constraint::Length(1));
-    }
-    constraints.push(Constraint::Min(1));
-    constraints.push(Constraint::Length(1));
-    constraints.push(Constraint::Length(1));
     let panes = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
-    let mut pane_idx = 0usize;
-    let gauge_pane = panes[pane_idx];
-    pane_idx += 1;
-    let flow_pane = if show_flow_bar {
-        let pane = panes[pane_idx];
-        pane_idx += 1;
-        Some(pane)
-    } else {
-        None
-    };
-    let list_pane = panes[pane_idx];
-    let info_pane = panes[pane_idx + 1];
-    let footer_pane = panes[pane_idx + 2];
+    let gauge_pane = panes[0];
+    let next_pane = panes[1];
+    let list_pane = panes[2];
+    let info_pane = panes[3];
+    let footer_pane = panes[4];
 
-    // Header: repository-wide progress gauge.
+    // Header: line-based gauge ratio, files-based label.
     let (completed, total) = view.overall;
     let ratio = if total == 0 {
         0.0
@@ -608,11 +660,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         .use_unicode(true)
         .gauge_style(Style::default().fg(theme::BLUE).bg(theme::CURRENT_LINE_BG))
         .label(Span::styled(
-            if view.repo_complete {
-                format!("{completed}/{total} lines · 100% · repo complete")
-            } else {
-                format!("{completed}/{total} lines · {:.0}%", ratio * 100.0)
-            },
+            header_label(view),
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ));
     let gauge_area = Rect {
@@ -622,18 +670,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         height: gauge_pane.height,
     };
     frame.render_widget(gauge, gauge_area);
-
-    if let (Some(pane), Some(flow), Some((done, total))) =
-        (flow_pane, view.flow.as_ref(), view.flow_counts)
-    {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" flow · entry {} · {done}/{total} done", flow.entry),
-                Style::default().fg(theme::CYAN),
-            ))),
-            pane,
-        );
-    }
+    frame.render_widget(Paragraph::new(next_line(view)), next_pane);
 
     frame.render_widget(Paragraph::new(info_line(view, info_pane.width)), info_pane);
 
@@ -723,7 +760,12 @@ fn selected_detail(view: &TreeView) -> String {
         }
         TreeRowKind::Dir { path } => {
             let (done, total) = row.file_counts.unwrap_or((0, 0));
-            format!("{path}/ · {total} files · {done} done")
+            let mut text = format!("{path}/ · {total} files · {done} done");
+            if let Some(flow) = &view.flow {
+                text.push_str(" · entry ");
+                text.push_str(&flow.entry);
+            }
+            text
         }
     }
 }
@@ -838,19 +880,6 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
                     Style::default()
                         .fg(theme::MUTED)
                         .add_modifier(Modifier::ITALIC),
-                ));
-            }
-            if view.recommend.as_deref() == Some(path.as_str()) {
-                let label = if view.flow.is_some() {
-                    "  ▸ next"
-                } else {
-                    "  ▸ recommend"
-                };
-                spans.push(Span::styled(
-                    label.to_string(),
-                    Style::default()
-                        .fg(theme::CYAN)
-                        .add_modifier(Modifier::BOLD),
                 ));
             }
         }
@@ -1081,6 +1110,26 @@ mod tests {
             "swift-scanner/…/SpecLinkSwiftScanner"
         );
         assert_eq!(elide_dir_name("src/cli", 20), "src/cli");
+    }
+
+    #[test]
+    fn header_label_counts_files_not_lines() {
+        let progress = RepoProgress {
+            files: vec![file("src/a.rs", "a\nb\nc"), file("lib.rs", "l")],
+        };
+        let tree = tree_view(&progress, false);
+        let label = header_label(&tree);
+        assert!(
+            label.contains("0/2 files"),
+            "expected file counts in {label}"
+        );
+        assert!(
+            !label.contains("lines"),
+            "label should not count lines: {label}"
+        );
+        assert_eq!(tree.overall, (0, 4));
+        assert_eq!(tree.recommend.as_deref(), Some("src/a.rs"));
+        assert_eq!(tree.recommend_lines, Some(3));
     }
 
     #[test]
