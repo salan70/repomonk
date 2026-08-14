@@ -280,9 +280,7 @@ impl App {
                 if let Event::Key(key) =
                     event::read().map_err(|e| Error::Terminal(e.to_string()))?
                 {
-                    if (key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat)
-                        && self.handle_key(key)?
-                    {
+                    if self.handle_key_event(key)? {
                         break;
                     }
                 }
@@ -317,6 +315,15 @@ impl App {
             let _ = self.store.touch_repository(s.repo_id);
         }
         Ok(())
+    }
+
+    /// Dispatches key presses and repeats, ignoring release notifications.
+    fn handle_key_event(&mut self, key: KeyEvent) -> crate::Result<bool> {
+        if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            self.handle_key(key)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Returns true when the app should quit.
@@ -1907,6 +1914,57 @@ mod tests {
             .and_then(|s| s.tree.selected_file_path());
         let recommend = app.session.as_ref().and_then(|s| s.tree.recommend.clone());
         assert_eq!(selected, recommend);
+    }
+
+    #[test]
+    fn tree_j_and_k_move_on_key_repeat() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+
+        app.handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ))
+        .unwrap();
+        let first = app
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.selected_file_path())
+            .unwrap();
+
+        app.handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ))
+        .unwrap();
+        let second = app
+            .session
+            .as_ref()
+            .and_then(|s| s.tree.selected_file_path())
+            .unwrap();
+        assert_ne!(second, first);
+
+        app.handle_key_event(KeyEvent::new_with_kind(
+            KeyCode::Char('k'),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ))
+        .unwrap();
+        assert_eq!(
+            app.session
+                .as_ref()
+                .and_then(|s| s.tree.selected_file_path())
+                .as_deref(),
+            Some(first.as_str())
+        );
     }
 
     #[test]
