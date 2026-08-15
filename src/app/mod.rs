@@ -17,6 +17,7 @@ use crate::domain::dependency::{order_files, uses_flow_mode, FlowOrder};
 use crate::domain::entry::{detect_entry_candidates, EntryCandidate};
 use crate::domain::file_type::{hidden_paths, FileTypePrefs, FileTypeState};
 use crate::domain::typing::{SessionState, TypingCommand, TypingEngine};
+use crate::samples::{SampleMode, SAMPLE_REPOS};
 use crate::scan::extract::ExtractOptions;
 use crate::scan::walk::{scan_repository, single_file_scan, WalkOptions};
 use crate::source::resolve_source;
@@ -1769,7 +1770,8 @@ fn load_session(
     let import_edges = scan.import_edges.clone();
     let (saved_mode, saved_entry) = store.load_repo_flow_prefs(repo_id)?;
     let show_flow_overlay = saved_mode.is_none();
-    let mode = saved_mode.unwrap_or(cfg.user.progress.mode);
+    let mode =
+        saved_mode.unwrap_or_else(|| recommended_progress_mode(input, cfg.user.progress.mode));
     let manifest_hints = crate::scan::manifest::read_entry_hints(&progress_repo.root);
     Ok(RepoSession::from_parts(
         progress_repo,
@@ -1807,6 +1809,17 @@ fn walk_options(user: &UserConfig, file_types: FileTypePrefs) -> WalkOptions {
         },
         file_types,
     }
+}
+
+fn recommended_progress_mode(input: &str, fallback: ProgressMode) -> ProgressMode {
+    SAMPLE_REPOS
+        .iter()
+        .find(|sample| sample.input == input)
+        .map(|sample| match sample.mode {
+            SampleMode::Flow => ProgressMode::Flow,
+            SampleMode::Manual => ProgressMode::Manual,
+        })
+        .unwrap_or(fallback)
 }
 
 impl RepoSession {

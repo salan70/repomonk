@@ -71,6 +71,9 @@ const GENERATED_SUFFIXES: &[&str] = &[
 const TEST_DIR_SEGMENTS: &[&str] = &["test", "tests", "__tests__", "spec", "specs"];
 
 const CONFIG_NAMES: &[&str] = &[
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG",
     "Cargo.toml",
     "Cargo.toml.orig",
     "package.json",
@@ -516,13 +519,20 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("README.md"), "documentation\n").unwrap();
+        fs::write(root.join("LICENSE"), "license\n").unwrap();
         fs::write(root.join("data.yaml"), "name: value\n").unwrap();
         fs::write(root.join("data.json"), "{\"name\":\"value\"}\n").unwrap();
         fs::write(root.join("page.html"), "<p>page</p>\n").unwrap();
         fs::write(root.join("style.css"), "body { color: red; }\n").unwrap();
 
         let skipped = scan_repository(root, WalkOptions::default()).unwrap();
-        for path in ["Cargo.toml", "README.md", "data.yaml", "data.json"] {
+        for path in [
+            "Cargo.toml",
+            "README.md",
+            "LICENSE",
+            "data.yaml",
+            "data.json",
+        ] {
             let file = skipped
                 .files
                 .iter()
@@ -545,7 +555,13 @@ mod tests {
             ..WalkOptions::default()
         };
         let included = scan_repository(root, opts).unwrap();
-        for path in ["Cargo.toml", "README.md", "data.yaml", "data.json"] {
+        for path in [
+            "Cargo.toml",
+            "README.md",
+            "LICENSE",
+            "data.yaml",
+            "data.json",
+        ] {
             assert_eq!(
                 included
                     .files

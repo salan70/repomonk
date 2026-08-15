@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
+use crate::samples::{SampleRepo, SAMPLE_REPOS};
 use crate::store::{GlobalSummary, RecentRepo};
 use crate::ui::i18n::UiStrings;
 use crate::ui::search::SearchState;
@@ -22,24 +23,31 @@ pub struct HomeView {
 
 impl HomeView {
     pub fn new(recent: Vec<RecentRepo>, summary: GlobalSummary) -> Self {
+        let has_recent = !recent.is_empty();
         Self {
             recent,
             summary,
-            selected: 0,
+            selected: if has_recent { SAMPLE_REPOS.len() } else { 0 },
             error: None,
         }
     }
 
     pub fn move_by(&mut self, delta: isize) {
-        if self.recent.is_empty() {
+        let len = self.item_count();
+        if len == 0 {
             return;
         }
-        let len = self.recent.len() as isize;
-        self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+        self.selected = (self.selected as isize + delta).rem_euclid(len as isize) as usize;
     }
 
     pub fn selected_input(&self) -> Option<&str> {
-        self.recent.get(self.selected).map(|r| r.input.as_str())
+        if self.selected < SAMPLE_REPOS.len() {
+            Some(SAMPLE_REPOS[self.selected].input)
+        } else {
+            self.recent
+                .get(self.selected - SAMPLE_REPOS.len())
+                .map(|r| r.input.as_str())
+        }
     }
 
     pub fn select_first(&mut self) {
@@ -47,7 +55,11 @@ impl HomeView {
     }
 
     pub fn select_last(&mut self) {
-        self.selected = self.recent.len().saturating_sub(1);
+        self.selected = self.item_count().saturating_sub(1);
+    }
+
+    fn item_count(&self) -> usize {
+        SAMPLE_REPOS.len() + self.recent.len()
     }
 }
 
@@ -65,6 +77,7 @@ pub fn draw_home(
         .constraints([
             Constraint::Length(LOGO.len() as u16 + 2),
             Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(5),
             Constraint::Length(2),
             Constraint::Length(1),
@@ -73,14 +86,15 @@ pub fn draw_home(
 
     splash::draw_animated_logo(frame, chunks[0], logo_elapsed_ms);
     draw_summary(frame, chunks[1], &view.summary, t);
-    draw_recent(frame, chunks[2], view, t);
+    draw_samples(frame, chunks[2], view, t);
+    draw_recent(frame, chunks[3], view, t);
     if let Some(err) = &view.error {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!("  {err}"),
                 Style::default().fg(theme::RED).bg(theme::BG),
             ))),
-            chunks[3],
+            chunks[4],
         );
     } else {
         frame.render_widget(
@@ -88,7 +102,7 @@ pub fn draw_home(
                 t.home_hint,
                 Style::default().fg(theme::MUTED).bg(theme::BG),
             ))),
-            chunks[3],
+            chunks[4],
         );
     }
     frame.render_widget(
@@ -99,7 +113,7 @@ pub fn draw_home(
             ("q", t.quit),
             ("?", t.help),
         ])),
-        chunks[4],
+        chunks[5],
     );
 }
 
@@ -125,6 +139,45 @@ fn draw_summary(frame: &mut Frame, area: Rect, summary: &GlobalSummary, t: &UiSt
     );
 }
 
+fn draw_samples(frame: &mut Frame, area: Rect, view: &HomeView, t: &UiStrings) {
+    let block = theme::bordered_block(theme::title_line(t.title_samples));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items: Vec<ListItem> = SAMPLE_REPOS
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| ListItem::new(sample_line(*sample, index == view.selected, t)))
+        .collect();
+    let mut state = ListState::default();
+    if view.selected < SAMPLE_REPOS.len() {
+        state.select(Some(view.selected));
+    }
+    let list = List::new(items)
+        .highlight_style(Style::default().bg(theme::SELECTION_BG))
+        .style(theme::base_style());
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn sample_line(sample: SampleRepo, selected: bool, t: &UiStrings) -> Line<'static> {
+    let mode = match sample.mode_label() {
+        "flow" => t.sample_flow,
+        _ => t.sample_manual,
+    };
+    let style = if selected {
+        Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::FG)
+    };
+    Line::from(vec![
+        Span::styled(format!(" {}", sample.language.label()), style),
+        Span::styled(
+            format!("  {}  {}", theme::FIELD_SEP, mode),
+            Style::default().fg(theme::MUTED),
+        ),
+    ])
+}
+
 fn draw_recent(frame: &mut Frame, area: Rect, view: &HomeView, t: &UiStrings) {
     let block = theme::bordered_block(theme::title_line(t.title_recent));
     let inner = block.inner(area);
@@ -148,7 +201,11 @@ fn draw_recent(frame: &mut Frame, area: Rect, view: &HomeView, t: &UiStrings) {
         .map(|r| ListItem::new(recent_line(r, t)))
         .collect();
     let mut state = ListState::default();
-    state.select(Some(view.selected.min(view.recent.len() - 1)));
+    if view.selected >= SAMPLE_REPOS.len() && !view.recent.is_empty() {
+        state.select(Some(
+            (view.selected - SAMPLE_REPOS.len()).min(view.recent.len() - 1),
+        ));
+    }
     let list = List::new(items)
         .highlight_style(Style::default().bg(theme::SELECTION_BG))
         .style(theme::base_style());
@@ -316,9 +373,12 @@ mod tests {
             ],
             GlobalSummary::default(),
         );
+        assert_eq!(view.selected, SAMPLE_REPOS.len());
         view.move_by(1);
-        assert_eq!(view.selected, 1);
+        assert_eq!(view.selected, SAMPLE_REPOS.len() + 1);
         view.move_by(1);
         assert_eq!(view.selected, 0);
+        view.select_first();
+        assert_eq!(view.selected_input(), Some(SAMPLE_REPOS[0].input));
     }
 }

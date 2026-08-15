@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 
+use crate::samples::SAMPLE_REPOS;
 use crate::source::git::parse_github_input;
 use crate::store::RecentRepo;
 
@@ -83,6 +84,12 @@ pub fn build_hits(query: &str, recent: &[RecentRepo], cache_dir: &Path) -> Vec<S
     }
 
     let mut candidates: Vec<(String, String)> = Vec::new();
+    for sample in SAMPLE_REPOS {
+        candidates.push((
+            format!("{}  {}", sample.language.label(), sample.input),
+            sample.input.to_string(),
+        ));
+    }
     for r in recent {
         candidates.push((r.display_name.clone(), r.input.clone()));
     }
@@ -233,5 +240,12 @@ mod tests {
         fs::create_dir_all(repos.join("owner__repo")).unwrap();
         let listed = list_cached_repos(dir.path());
         assert_eq!(listed, vec![("owner/repo".into(), "owner/repo".into())]);
+    }
+
+    #[test]
+    fn built_in_samples_are_searchable() {
+        let hits = build_hits("python", &[], Path::new("/nonexistent"));
+        assert_eq!(hits[0].input, "salan70/repomonk-sample-python");
+        assert!(hits[0].label.starts_with("Python"));
     }
 }
