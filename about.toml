@@ -1,0 +1,38 @@
+# THIRD-PARTY-LICENSES.md の生成設定。
+# 再生成手順は docs/development.md §8.3 を参照。
+#
+#   cargo about generate --all-features -o THIRD-PARTY-LICENSES.md about.hbs
+
+# 配布するのは 3 ターゲットぶんのバイナリだけなので、その依存だけを対象にする。
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+
+# ビルド専用の依存は配布物に含まれないが、cc でリンクされる C ソースもあるため
+# 除外せず一覧に含める。
+ignore-build-dependencies = false
+ignore-dev-dependencies = true
+
+# 許可するライセンス。GPL 系が混ざると生成が失敗するので、ここが検知装置も兼ねる。
+# 新しいライセンスが増えたときは、内容を確認してから追記する。
+# 順序が優先順位になる。デュアルライセンスのクレートは先頭に近いものへ解決される。
+# repomonk 自身が MIT なので MIT を先頭に置き、表示を揃える。
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    # dirs 経由の option-ext のみ。ファイル単位 copyleft のため、改変せず
+    # リンクする使い方では自プロジェクトの開示義務は生じない（D-034）。
+    "MPL-2.0",
+]

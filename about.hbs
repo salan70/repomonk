@@ -1,0 +1,31 @@
+# サードパーティライセンス
+
+repomonk のビルド済みバイナリには、次の依存クレートが含まれます。
+この文書は `cargo about` が生成しています。手で編集せず、依存を増減したときに
+再生成してください（手順: `docs/development.md` §8.3）。
+
+repomonk 自身のライセンスは [MIT License](LICENSE) です。
+
+## 使用しているライセンス
+
+{{#each overview}}
+- [{{name}}](#{{id}}) — {{count}} crate
+{{/each}}
+
+## ライセンス全文
+
+{{#each licenses}}
+### {{name}}
+<a id="{{id}}"></a>
+
+使用クレート:
+
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}]({{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}})
+{{/each}}
+
+```text
+{{text}}
+```
+
+{{/each}}
