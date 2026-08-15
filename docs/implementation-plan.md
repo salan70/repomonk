@@ -20,6 +20,7 @@ URL / ローカルrepo
 - `repomonk`（引数なし）でのHome起動、および
   `repomonk <GitHub URL | ローカルパス>`からの直接起動（Home省略）
 - HomeのRecent / Summary、Searchモーダル（ローカル候補のみ）、達成サマリ（`S`）
+- Homeの初回体験用Samples（TypeScript / Python / Java）と、Searchへの静的サンプル候補
 - system `git`によるshallow cloneとキャッシュ再利用
 - リポジトリ走査、自動対象外判定、対象外理由
 - 共通規則による正規化とファイル全文の写経単位抽出

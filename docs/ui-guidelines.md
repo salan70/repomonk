@@ -45,3 +45,9 @@ Typing だけはフッタ行を持たないので、1 行に 2 系統が同居�
 - 配色は `theme.rs` の Tokyo Night 定数だけを使う。
 
 `src/ui` のソースにスペース付き中黒（U+00B7）が含まれるとテストが失敗します。
+
+## Homeのサンプル欄
+
+- Samples欄をRecent欄の上に置き、Samplesは固定3行とする。
+- 言語名と推奨モードは`theme::FIELD_SEP`で区切る。
+- SamplesとRecentは1つの選択列として扱い、選択中の行だけを通常のListハイライトで示す。

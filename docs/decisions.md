@@ -852,6 +852,34 @@ Tree を見ながら一時的に確認する操作と、既定を変える操作
 - `docs/ui-guidelines.md` を新設し、`AGENTS.md` と `CLAUDE.md` から参照する。
 - `docs/product-requirements.md` §8.2、§9.2、§9.4 の表示例を更新する。
 
+## D-032: 初回体験用サンプルは独立3リポジトリをHomeから開く
+
+- 状態: 採用
+- 日付: 2026-08-15
+
+### 決定
+
+- TypeScript、Python、Javaで同一仕様の自動販売機CLIを用意する。
+- 各サンプルは独立したpublicリポジトリとし、repomonk本体にはsubmoduleを置かない。
+- repomonk本体は、言語、`owner/repo`、推奨モード、仕様revisionだけを静的カタログへ持つ。
+- HomeにはSamples欄を表示し、Searchにも同じカタログを候補として追加する。
+- TypeScript / PythonはFlow、JavaはManualを推奨表示とする。Java用のimport resolver追加は
+  この決定の範囲外とする。
+
+### 理由
+
+サンプルをrepomonk自身の走査対象へ混ぜず、利用者がsystem gitでそのままcloneできる
+独立リポジトリとして保守するためです。submoduleの親SHAはHomeから開く最新mainの
+配布安定性を固定せず、開発用checkoutだけを複雑にします。
+
+### 影響
+
+- `salan70/repomonk-sample-typescript`、`salan70/repomonk-sample-python`、
+  `salan70/repomonk-sample-java`を作成し、同一ゴールデン出力と契約revisionをCIで検証する。
+- HomeはSamplesとRecentを連続した選択列として扱う。
+- サンプル変更は3リポジトリのPRをrepomonk側のIssueで追跡し、3つの検証済みmainを確認後に
+  カタログを更新する。
+
 ## D-033: Typing の Esc は必ず外側へ進み、Pause は計測を止める
 
 - 状態: 採用

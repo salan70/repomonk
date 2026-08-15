@@ -14,6 +14,11 @@ cargo run -- /path/to/repo
 cargo run -- https://github.com/<owner>/<repo>
 cargo run -- <owner>/<repo>
 
+# 初回体験用サンプル（Homeの「サンプル」からも選択可能）
+cargo run -- salan70/repomonk-sample-typescript
+cargo run -- salan70/repomonk-sample-python
+cargo run -- salan70/repomonk-sample-java
+
 # 管理データの削除（確認あり。CI では --yes）
 cargo run -- --purge
 ```
@@ -34,6 +39,7 @@ cargo run -- --purge
 - [開発ガイド](docs/development.md)
 - [意思決定記録](docs/decisions.md)
 - [GitHub公開前チェックリスト](docs/public-release-checklist.md)
+- [初回体験用サンプル仕様](docs/sample-projects.md)
 
 ## 開発
 
@@ -51,8 +57,8 @@ cargo test --all-features
 
 ## 現在の状態
 
-MVP の縦切り体験（取得 → ツリー → 写経 → 結果 → 進捗保存）が動作します。
-tree-sitter ラベル、dependency モード、Home/Search、演出などは MVP 後です。
+MVP の縦切り体験（取得 → ツリー → 写経 → 結果 → 進捗保存）と、
+Homeから開けるTypeScript / Python / Javaの自動販売機サンプルが動作します。
 
 ## ライセンス
 

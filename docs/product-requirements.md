@@ -290,8 +290,12 @@ Homeの`s`（検索）と`c`（設定）はエイリアスとして残します�
 
 **Home**
 
-- `j`/`k`、`↑`/`↓`でRecentを選択する。`g`/`G`で先頭/末尾へ移動する。
-- `Enter`で選択中のリポジトリを開く。
+- 画面上部に固定のSamples欄、その下にRecent欄を表示する。
+- SamplesにはTypeScript / Python / Javaの初回体験用リポジトリを表示し、
+  TypeScriptとPythonはFlow、JavaはManualを推奨モードとして示す。
+- `j`/`k`、`↑`/`↓`でSamplesとRecentを連続して選択する。Recentが存在する場合は
+  先頭Recent、存在しない場合は先頭Sampleを初期選択する。`g`/`G`で全体の先頭/末尾へ移動する。
+- `Enter`で選択中のサンプルまたはリポジトリを開く。
 - `/`でSearchを開く。`q`で終了する。
 
 **Tree**
