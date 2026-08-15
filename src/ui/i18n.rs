@@ -196,7 +196,6 @@ pub struct UiStrings {
 
     pub typing_line: &'static str,
     pub typing_misses: &'static str,
-    pub typing_esc_pause: &'static str,
     pub typing_lines: &'static str,
 
     pub error_prefix: &'static str,
@@ -481,7 +480,6 @@ const JA: UiStrings = UiStrings {
 
     typing_line: "行",
     typing_misses: "ミス",
-    typing_esc_pause: "Esc ポーズ",
     typing_lines: "行",
 
     error_prefix: "エラー",
@@ -681,7 +679,6 @@ const EN: UiStrings = UiStrings {
 
     typing_line: "line",
     typing_misses: "misses",
-    typing_esc_pause: "Esc pause",
     typing_lines: "lines",
 
     error_prefix: "error",

@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::config::FxPreset;
 use crate::domain::typing::TypingSnapshot;
 use crate::ui::fx::FxState;
-use crate::ui::i18n::UiStrings;
+use crate::ui::i18n::{display_width, UiStrings};
 use crate::ui::theme;
 
 /// Cursor glow color per no-miss streak tier (0..=3).
@@ -101,10 +101,34 @@ pub fn draw_typing(
             total_lines,
             fx,
             show_live_speed,
+            panes[2].width,
             t,
         )),
         panes[2],
     );
+}
+
+/// Key hints for the status row, widest set that fits first.
+///
+/// Typing has no footer row, so the hints share the status row with the data
+/// fields. When the row is too narrow the hints give way — the data fields
+/// (line number, misses) are never truncated.
+fn typing_hints(width: u16, data_width: usize, t: &UiStrings) -> Option<Line<'static>> {
+    /// Minimum blank columns between the data fields and the hints.
+    const MIN_GAP: usize = 2;
+    [
+        theme::key_hints(&[("Esc", t.pause), ("Ctrl-C", t.quit)]),
+        theme::key_hints(&[("Esc", t.pause)]),
+    ]
+    .into_iter()
+    .find(|hints| data_width + line_width(hints) + MIN_GAP <= width as usize)
+}
+
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum()
 }
 
 fn status_line(
@@ -113,6 +137,7 @@ fn status_line(
     total_lines: usize,
     fx: Option<&FxState>,
     show_live_speed: bool,
+    width: u16,
     t: &UiStrings,
 ) -> Line<'static> {
     let mut spans = vec![
@@ -155,11 +180,17 @@ fn status_line(
         spans.push(theme::field_sep());
         spans.push(Span::styled(format!("⚡{}", fx.streak()), style));
     }
-    spans.push(theme::field_sep());
-    spans.push(Span::styled(
-        t.typing_esc_pause,
-        Style::default().fg(theme::MUTED),
-    ));
+    // Data fields on the left joined by `field_sep()`, key hints right-aligned:
+    // the two separator systems share the row but are never concatenated.
+    let data_width: usize = spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum();
+    if let Some(hints) = typing_hints(width, data_width, t) {
+        let pad = (width as usize).saturating_sub(data_width + line_width(&hints));
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.extend(hints.spans);
+    }
     Line::from(spans)
 }
 
@@ -382,4 +413,82 @@ fn line_index_at(lines: &[Vec<(usize, char)>], cursor: usize) -> usize {
         }
     }
     lines.len().saturating_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::UiLanguage;
+    use crate::domain::typing::{SessionState, TypingSnapshot};
+    use crate::ui::i18n::strings;
+
+    fn ja() -> &'static UiStrings {
+        strings(UiLanguage::Ja)
+    }
+
+    fn snap() -> TypingSnapshot {
+        TypingSnapshot {
+            state: SessionState::Active,
+            target: "one\ntwo\n".into(),
+            cursor: 4,
+            expected: Some('t'),
+            miss_until_ms: None,
+            keystrokes: 4,
+            misses: 3,
+            elapsed_ms: 1_000,
+            started_at_ms: 0,
+            auto_inserted: Vec::new(),
+        }
+    }
+
+    fn rendered(width: u16) -> String {
+        status_line(&snap(), 2, 2, None, false, width, ja())
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn status_line_right_aligns_key_hints() {
+        let line = status_line(&snap(), 2, 2, None, false, 100, ja());
+        assert_eq!(line_width(&line), 100);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.trim_end().ends_with(ja().quit), "{text}");
+        assert!(text.contains("Esc"), "{text}");
+        // The gap between the data fields and the hints is padding, nothing else.
+        let gap = &text[text.find(&format!("{} 3", ja().typing_misses)).unwrap()..];
+        assert!(gap.contains("   "), "{text}");
+    }
+
+    #[test]
+    fn status_line_degrades_to_pause_hint_when_narrow() {
+        let full = rendered(100);
+        assert!(full.contains("Ctrl-C"), "{full}");
+        // Wide enough for `Esc ポーズ` after the data fields, but not for Ctrl-C.
+        let narrow = rendered(34);
+        assert!(narrow.contains("Esc"), "{narrow}");
+        assert!(!narrow.contains("Ctrl-C"), "{narrow}");
+    }
+
+    #[test]
+    fn status_line_drops_all_hints_when_very_narrow() {
+        let text = rendered(20);
+        assert!(!text.contains("Esc"), "{text}");
+        assert!(text.contains(ja().typing_misses), "{text}");
+        assert!(line_width(&status_line(&snap(), 2, 2, None, false, 20, ja())) <= 20);
+    }
+
+    #[test]
+    fn status_line_keeps_field_sep_out_of_the_key_hints() {
+        let text = rendered(100);
+        let hints_at = text.find("Esc").expect("hints");
+        assert!(
+            !text[hints_at..].contains(theme::FIELD_SEP),
+            "key hints must be space separated, not `{}`: {text}",
+            theme::FIELD_SEP
+        );
+        // The data fields still use it.
+        assert!(text[..hints_at].contains(theme::FIELD_SEP), "{text}");
+    }
 }
