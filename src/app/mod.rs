@@ -362,20 +362,27 @@ impl App {
                 if self.showing_splash && splash_elapsed >= SPLASH_TOTAL_MS {
                     self.showing_splash = false;
                 }
-                let finished = self.session.as_mut().and_then(|session| {
-                    let engine = session.engine.as_mut()?;
-                    let now_ms = now_millis();
-                    engine.apply(TypingCommand::Tick { now_ms });
-                    let state = engine.snapshot().state;
-                    if state == SessionState::Completed {
-                        Some(true)
-                    } else {
-                        None
-                    }
-                });
+                // The clock stops while paused: withholding the tick freezes
+                // `elapsed_ms`, and `resume_at` moves the start forward on resume.
+                let paused = self.typing_paused();
+                let finished = if paused {
+                    None
+                } else {
+                    self.session.as_mut().and_then(|session| {
+                        let engine = session.engine.as_mut()?;
+                        let now_ms = now_millis();
+                        engine.apply(TypingCommand::Tick { now_ms });
+                        let state = engine.snapshot().state;
+                        if state == SessionState::Completed {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    })
+                };
                 if let Some(completed) = finished {
                     self.finish_typing(completed)?;
-                } else if self.place == Place::Typing {
+                } else if self.place == Place::Typing && !paused {
                     self.autosave_checkpoint(false)?;
                 }
                 last_tick = Instant::now();
@@ -471,6 +478,11 @@ impl App {
             Place::Typing => self.handle_typing_key(key),
             Place::Result => self.handle_result_key(key),
         }
+    }
+
+    /// True while the Pause overlay is up, i.e. the typing clock is stopped.
+    fn typing_paused(&self) -> bool {
+        self.overlay == Some(Overlay::Pause)
     }
 
     fn help_context(&self) -> HelpContext {
@@ -1168,8 +1180,18 @@ impl App {
             return Ok(false);
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+            // `Esc` keeps moving outward, the same as everywhere else:
+            // Typing -> Pause -> Tree.
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.interrupt_typing()?;
+                Ok(false)
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
                 self.overlay = None;
+                // Rebase the clock so the paused interval is not charged to the session.
+                if let Some(engine) = self.session.as_mut().and_then(|s| s.engine.as_mut()) {
+                    engine.resume_at(now_millis());
+                }
                 Ok(false)
             }
             KeyCode::Char('r') => {
@@ -1183,11 +1205,6 @@ impl App {
                     self.reset_typing_session()?;
                     self.start_file(&path, 0)?;
                 }
-                Ok(false)
-            }
-            KeyCode::Char('t') => {
-                self.overlay = None;
-                self.interrupt_typing()?;
                 Ok(false)
             }
             _ => Ok(false),
@@ -1226,10 +1243,8 @@ impl App {
                 }
                 Ok(false)
             }
-            KeyCode::Char('t') => {
-                self.return_to_tree();
-                Ok(false)
-            }
+            // No `t` here: going back is `Esc`/`q` everywhere, and `t` is the
+            // Tree's File types key alone.
             _ => Ok(false),
         }
     }
@@ -1240,7 +1255,10 @@ impl App {
             session.engine = None;
             session.result = None;
             let progress = session.progress.clone();
-            session.tree.refresh_rows(&progress);
+            // Land on the file that was being typed so `Enter` resumes it, rather
+            // than on whatever row happened to be selected before it was opened.
+            let path = session.typing_path.clone();
+            session.tree.reveal_path(&progress, &path);
         }
         self.place = Place::Tree;
         self.overlay = None;
@@ -1484,6 +1502,9 @@ impl App {
     /// Persist the current engine state, at most once per second unless forced.
     fn autosave_checkpoint(&mut self, force: bool) -> crate::Result<()> {
         let now_ms = now_millis();
+        // Forced saves still happen while paused (Ctrl-C, leaving, restarting),
+        // but they must persist the frozen elapsed rather than re-adding the pause.
+        let paused = self.typing_paused();
         let should_save = self
             .session
             .as_ref()
@@ -1502,7 +1523,9 @@ impl App {
             let Some(engine) = &mut session.engine else {
                 return Ok(());
             };
-            engine.apply(TypingCommand::Tick { now_ms });
+            if !paused {
+                engine.apply(TypingCommand::Tick { now_ms });
+            }
             let snapshot = engine.snapshot();
             TypingCheckpoint {
                 chunk_id: session.typing_chunk_id,
@@ -2154,7 +2177,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_esc_pauses_and_t_interrupts_without_result() {
+    fn typing_esc_pauses_and_pause_esc_returns_to_tree() {
         let dir = tempdir().unwrap();
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
         let mut app = headless::open_local(
@@ -2168,10 +2191,15 @@ mod tests {
         assert_eq!(headless::place_name(&app), "typing");
         headless::press(&mut app, KeyCode::Esc).unwrap();
         assert_eq!(headless::overlay_name(&app), Some("pause"));
-        headless::press_char(&mut app, 't').unwrap();
+        // `Esc` keeps moving outward instead of bouncing back into Typing.
+        headless::press(&mut app, KeyCode::Esc).unwrap();
         assert_eq!(headless::place_name(&app), "tree");
         assert_eq!(headless::overlay_name(&app), None);
         assert!(app.session.as_ref().is_some_and(|s| s.result.is_none()));
+        assert_eq!(
+            app.session.as_ref().and_then(|s| s.tree.selected_path()),
+            Some(path.clone())
+        );
         assert_eq!(
             app.progress()
                 .files
@@ -2180,6 +2208,113 @@ mod tests {
                 .map(crate::domain::content::FileProgress::derive_status),
             Some(FileStatus::Todo)
         );
+    }
+
+    #[test]
+    fn pause_enter_and_space_resume_typing() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        let path = app.progress().recommend_path().unwrap().to_string();
+        app.start_file(&path, 0).unwrap();
+
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("pause"));
+        headless::press(&mut app, KeyCode::Enter).unwrap();
+        assert_eq!(headless::overlay_name(&app), None);
+        assert_eq!(headless::place_name(&app), "typing");
+
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::overlay_name(&app), Some("pause"));
+        headless::press_char(&mut app, ' ').unwrap();
+        assert_eq!(headless::overlay_name(&app), None);
+        assert_eq!(headless::place_name(&app), "typing");
+    }
+
+    #[test]
+    fn typing_esc_selects_the_typed_file_in_tree() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        let path = app.progress().recommend_path().unwrap().to_string();
+        // Park the cursor somewhere else, the way opening from Result's `Enter`
+        // leaves it: restoring the previously selected row would land there.
+        if let Some(session) = &mut app.session {
+            session.tree.select_last();
+        }
+        let parked = app.session.as_ref().and_then(|s| s.tree.selected_path());
+        assert_ne!(parked.as_deref(), Some(path.as_str()));
+
+        app.start_file(&path, 0).unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
+        assert_eq!(
+            app.session.as_ref().and_then(|s| s.tree.selected_path()),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn typing_esc_reveals_collapsed_ancestors() {
+        let dir = tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(repo_dir.join("src/deep")).unwrap();
+        std::fs::write(repo_dir.join("src/deep/main.rs"), "one\ntwo").unwrap();
+        let mut app = headless::open_local(
+            repo_dir.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        let path = app.progress().recommend_path().unwrap().to_string();
+
+        // Collapse everything, so a plain `jump_to_path` would silently fail.
+        if let Some(session) = &mut app.session {
+            session.tree.opened.clear();
+            let progress = session.progress.clone();
+            session.tree.refresh_rows(&progress);
+            assert!(!session.tree.jump_to_path(&path));
+        }
+
+        app.start_file(&path, 0).unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
+        assert_eq!(
+            app.session.as_ref().and_then(|s| s.tree.selected_path()),
+            Some(path)
+        );
+    }
+
+    #[test]
+    fn result_t_is_a_no_op_and_esc_returns_to_tree() {
+        let dir = tempdir().unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample_repo");
+        let mut app = headless::open_local(
+            fixture.to_str().unwrap(),
+            &dir.path().join("db.sqlite"),
+            &dir.path().join("cache"),
+        )
+        .unwrap();
+        headless::complete_recommended(&mut app).unwrap();
+        assert_eq!(headless::place_name(&app), "result");
+        // `t` belongs to the Tree's File types alone now.
+        headless::press_char(&mut app, 't').unwrap();
+        assert_eq!(headless::place_name(&app), "result");
+        assert_eq!(headless::overlay_name(&app), None);
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
     }
 
     #[test]
@@ -2200,7 +2335,8 @@ mod tests {
         headless::press_char(&mut app, 'e').unwrap();
         headless::press(&mut app, KeyCode::Enter).unwrap();
         headless::press(&mut app, KeyCode::Esc).unwrap();
-        headless::press_char(&mut app, 't').unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
+        assert_eq!(headless::place_name(&app), "tree");
         assert_eq!(app.progress().completed_lines(), 1);
 
         let mut resumed = headless::open_local(repo_dir.to_str().unwrap(), &db, &cache).unwrap();
@@ -2278,7 +2414,7 @@ mod tests {
             Some(next.as_str())
         );
         headless::press(&mut app, KeyCode::Esc).unwrap();
-        headless::press_char(&mut app, 't').unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
         app.start_file(&first, 0).unwrap();
         // empty file bodies complete immediately
         if headless::place_name(&app) == "result" {
@@ -2632,7 +2768,7 @@ mod tests {
         let mut app = headless::open_local(repo.path().to_str().unwrap(), &db, &cache).unwrap();
         headless::complete_recommended(&mut app).unwrap();
         assert_eq!(headless::place_name(&app), "result");
-        headless::press_char(&mut app, 't').unwrap();
+        headless::press(&mut app, KeyCode::Esc).unwrap();
         assert_eq!(headless::place_name(&app), "tree");
         assert_eq!(headless::overlay_name(&app), None);
 

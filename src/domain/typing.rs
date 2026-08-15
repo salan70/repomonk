@@ -165,6 +165,17 @@ impl TypingEngine {
         Ok(engine)
     }
 
+    /// Rebase the clock after a pause so the paused interval is not counted.
+    ///
+    /// Elapsed time is derived as `now_ms - started_at_ms`, so resuming means
+    /// moving the start forward by however long the pause lasted. This is the
+    /// same adjustment `from_checkpoint` makes for time spent outside Typing.
+    pub fn resume_at(&mut self, now_ms: u64) {
+        let elapsed = self.now_ms.saturating_sub(self.started_at_ms);
+        self.started_at_ms = now_ms.saturating_sub(elapsed);
+        self.now_ms = now_ms;
+    }
+
     pub fn snapshot(&self) -> TypingSnapshot {
         let expected = self.target.get(self.cursor).copied();
         let auto_idxs: Vec<usize> = self
@@ -394,6 +405,19 @@ mod tests {
         e.apply(TypingCommand::Char('x'));
         e.apply(TypingCommand::Tick { now_ms: 150 });
         assert_eq!(e.snapshot().miss_until_ms, None);
+    }
+
+    #[test]
+    fn resume_at_does_not_charge_the_paused_interval() {
+        let mut e = engine("ab");
+        e.apply(TypingCommand::Tick { now_ms: 1_000 });
+        assert_eq!(e.snapshot().elapsed_ms, 1_000);
+        // Paused for ten seconds: no ticks arrive, so the clock is frozen, and
+        // resuming moves the start forward instead of billing the pause.
+        e.resume_at(11_000);
+        assert_eq!(e.snapshot().elapsed_ms, 1_000);
+        e.apply(TypingCommand::Tick { now_ms: 11_500 });
+        assert_eq!(e.snapshot().elapsed_ms, 1_500);
     }
 
     #[test]

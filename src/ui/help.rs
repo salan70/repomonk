@@ -123,7 +123,7 @@ fn context_lines(ctx: HelpContext, t: &UiStrings) -> Vec<Line<'static>> {
         HelpContext::Result => vec![
             hint("Enter", t.next),
             hint("r", t.retry),
-            hint("t/Esc", t.tree),
+            hint("Esc/q", t.back),
         ],
         HelpContext::Search => vec![
             hint("Enter", t.open),
@@ -143,9 +143,9 @@ fn context_lines(ctx: HelpContext, t: &UiStrings) -> Vec<Line<'static>> {
             hint("Esc", t.close),
         ],
         HelpContext::Pause => vec![
-            hint("Esc/Enter", t.resume),
-            hint("r", t.retry),
-            hint("t", t.tree),
+            hint("Enter/Space", t.resume),
+            hint("r", t.restart),
+            hint("Esc/q", t.back),
         ],
         HelpContext::FileTypes => vec![
             hint("j/k", t.move_),

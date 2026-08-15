@@ -21,7 +21,7 @@ pub fn draw_pause(frame: &mut Frame, area: Rect, t: &UiStrings) {
         Line::from(Span::styled(
             t.pause_timer,
             Style::default()
-                .fg(theme::YELLOW)
+                .fg(theme::GREEN)
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),
@@ -32,9 +32,9 @@ pub fn draw_pause(frame: &mut Frame, area: Rect, t: &UiStrings) {
         .alignment(Alignment::Center),
         Line::from(""),
         theme::key_hints(&[
-            ("Esc/Enter", t.resume),
-            ("r", t.retry),
-            ("t", t.tree),
+            ("Enter", t.resume),
+            ("r", t.restart),
+            ("Esc", t.back),
             ("?", t.help),
         ])
         .alignment(Alignment::Center),
