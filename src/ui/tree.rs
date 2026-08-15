@@ -43,7 +43,7 @@ pub struct TreeView {
     pub recommend: Option<String>,
     pub title: String,
     /// Directories the user has opened. Anything absent is closed, so a directory
-    /// that only appears once excluded files are shown starts closed like the rest.
+    /// that only appears once excluded files are shown starts closed.
     pub opened: std::collections::HashSet<String>,
     /// Flow traversal order, when flow mode is active.
     pub flow: Option<FlowOrder>,
@@ -73,6 +73,8 @@ pub struct TreeView {
     /// Paths whose file type is set to `Hidden`: excluded from the tree unconditionally,
     /// regardless of `hide_skipped`. Rolls up to hide a directory whose files are all hidden.
     pub hidden_paths: std::collections::HashSet<String>,
+    /// True when every directory in the (unfiltered) tree is in `opened`.
+    pub fully_expanded: bool,
 }
 
 impl TreeView {
@@ -96,14 +98,14 @@ impl TreeView {
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
         let root = directory_progress(progress, "");
         let all_rows = compress_chains(flatten(progress, hide_skipped, &hidden_paths));
-        let mut opened = std::collections::HashSet::new();
-        if let Some(path) = &recommend {
-            let mut current = path.clone();
-            while let Some(parent) = parent_path(&current) {
-                opened.insert(parent.clone());
-                current = parent;
-            }
-        }
+        let opened: std::collections::HashSet<String> = all_rows
+            .iter()
+            .filter_map(|row| match &row.kind {
+                TreeRowKind::Dir { path } => Some(path.clone()),
+                TreeRowKind::File { .. } => None,
+            })
+            .collect();
+        let fully_expanded = !opened.is_empty();
         let rows = apply_collapse(all_rows, &opened);
         let mut view = Self {
             rows,
@@ -125,6 +127,7 @@ impl TreeView {
             excluded: excluded_count(progress, &hidden_paths),
             message: None,
             hidden_paths,
+            fully_expanded,
         };
         view.jump_recommend();
         // The real list height is unknown until the first draw, so leave the scroll
@@ -159,6 +162,12 @@ impl TreeView {
         let prev_paths: Vec<String> = self.rows.iter().map(row_path).collect();
         let prev_selected = self.selected;
         let screen_row = prev_selected.saturating_sub(self.offset);
+        self.fully_expanded = is_fully_expanded(
+            &self.opened,
+            progress,
+            self.hide_skipped,
+            &self.hidden_paths,
+        );
         self.rows = visible_rows(
             progress,
             &self.opened,
@@ -372,6 +381,26 @@ impl TreeView {
             self.refresh_rows(progress);
         }
     }
+
+    /// Expand every directory, or if already fully expanded, collapse all except
+    /// the ancestors of the selected row so the cursor stays visible.
+    pub fn toggle_expand_all(&mut self, progress: &RepoProgress) {
+        let dirs = all_dir_paths(progress, self.hide_skipped, &self.hidden_paths);
+        if dirs.is_empty() {
+            return;
+        }
+        if dirs.iter().all(|path| self.opened.contains(path)) {
+            let keep = self
+                .selected_path()
+                .or_else(|| self.recommend.clone())
+                .unwrap_or_default();
+            self.opened.clear();
+            open_ancestors(&mut self.opened, &keep);
+        } else {
+            self.opened.extend(dirs);
+        }
+        self.refresh_rows(progress);
+    }
 }
 
 fn excluded_count(
@@ -453,6 +482,38 @@ fn row_path(row: &TreeRow) -> String {
 
 fn parent_path(path: &str) -> Option<String> {
     path.rsplit_once('/').map(|(parent, _)| parent.to_string())
+}
+
+fn open_ancestors(opened: &mut std::collections::HashSet<String>, path: &str) {
+    let mut current = path.to_string();
+    while let Some(parent) = parent_path(&current) {
+        opened.insert(parent.clone());
+        current = parent;
+    }
+}
+
+fn all_dir_paths(
+    progress: &RepoProgress,
+    hide_skipped: bool,
+    hidden_paths: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    compress_chains(flatten(progress, hide_skipped, hidden_paths))
+        .into_iter()
+        .filter_map(|row| match row.kind {
+            TreeRowKind::Dir { path } => Some(path),
+            TreeRowKind::File { .. } => None,
+        })
+        .collect()
+}
+
+fn is_fully_expanded(
+    opened: &std::collections::HashSet<String>,
+    progress: &RepoProgress,
+    hide_skipped: bool,
+    hidden_paths: &std::collections::HashSet<String>,
+) -> bool {
+    let dirs = all_dir_paths(progress, hide_skipped, hidden_paths);
+    !dirs.is_empty() && dirs.iter().all(|path| opened.contains(path))
 }
 
 fn visible_rows(
@@ -738,12 +799,36 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView, t: &UiStrings) 
         .style(theme::base_style());
     frame.render_stateful_widget(list, list_pane, &mut state);
 
-    let hints = if view.filter_editing {
-        [("Esc", t.clear), ("n/N", t.next), ("?", t.more)]
+    frame.render_widget(
+        Paragraph::new(theme::key_hints(&tree_footer_hints(view, t))),
+        footer_pane,
+    );
+}
+
+fn tree_footer_hints<'a>(view: &TreeView, t: &'a UiStrings) -> Vec<(&'static str, &'a str)> {
+    if view.filter_editing {
+        vec![
+            ("Esc", t.clear),
+            ("n/N", t.next),
+            ("j/k", t.move_),
+            ("Enter", t.open),
+            ("?", t.more),
+        ]
     } else {
-        [("Enter", t.open), ("j/k", t.move_), ("?", t.more)]
-    };
-    frame.render_widget(Paragraph::new(theme::key_hints(&hints)), footer_pane);
+        let expand = if view.fully_expanded {
+            t.collapse_all
+        } else {
+            t.expand_all
+        };
+        vec![
+            ("Enter", t.open),
+            ("j/k", t.move_),
+            ("h/l", t.fold),
+            ("o", expand),
+            ("Tab", t.next_file),
+            ("?", t.more),
+        ]
+    }
 }
 
 fn info_line(view: &TreeView, width: u16, t: &UiStrings) -> Line<'static> {
@@ -1302,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_by_default_expands_path_to_recommend() {
+    fn expanded_by_default_shows_all_directories() {
         let mut progress = progress();
         progress.files.push(file("other/x.rs", "x"));
         let tree = tree_view(&progress, false);
@@ -1311,10 +1396,66 @@ mod tests {
         assert!(names.contains(&"a.rs"));
         assert!(names.contains(&"b.rs"));
         assert!(names.contains(&"other"));
-        assert!(!names.contains(&"x.rs"));
-        assert!(!tree.opened.contains("other"));
+        assert!(names.contains(&"x.rs"));
+        assert!(tree.opened.contains("other"));
         assert!(tree.opened.contains("src"));
+        assert!(tree.fully_expanded);
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn toggle_expand_all_collapses_except_selection_ancestors() {
+        let mut progress = progress();
+        progress.files.push(file("other/x.rs", "x"));
+        let mut tree = tree_view(&progress, false);
+        assert!(tree.fully_expanded);
+        assert!(tree.jump_to_path("src/b.rs"));
+        tree.toggle_expand_all(&progress);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"b.rs"));
+        assert!(!names.contains(&"x.rs"));
+        assert!(tree.opened.contains("src"));
+        assert!(!tree.opened.contains("other"));
+        assert!(!tree.fully_expanded);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/b.rs"));
+    }
+
+    #[test]
+    fn toggle_expand_all_restores_every_directory() {
+        let mut progress = progress();
+        progress.files.push(file("other/x.rs", "x"));
+        let mut tree = tree_view(&progress, false);
+        tree.toggle_expand_all(&progress);
+        tree.toggle_expand_all(&progress);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"x.rs"));
+        assert!(tree.opened.contains("src"));
+        assert!(tree.opened.contains("other"));
+        assert!(tree.fully_expanded);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+    }
+
+    #[test]
+    fn footer_lists_fold_and_expand_shortcuts() {
+        let mut progress = progress();
+        progress.files.push(file("other/x.rs", "x"));
+        let mut tree = tree_view(&progress, false);
+        let keys = |tree: &TreeView| {
+            tree_footer_hints(tree, en())
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&tree), ["Enter", "j/k", "h/l", "o", "Tab", "?"]);
+        let hints = tree_footer_hints(&tree, en());
+        assert_eq!(hints[3], ("o", "collapse"));
+
+        tree.toggle_expand_all(&progress);
+        let hints = tree_footer_hints(&tree, en());
+        assert_eq!(hints[3], ("o", "expand"));
+
+        tree.filter_editing = true;
+        assert_eq!(keys(&tree), ["Esc", "n/N", "j/k", "Enter", "?"]);
     }
 
     #[test]

@@ -1006,6 +1006,13 @@ impl App {
                 }
                 Ok(false)
             }
+            KeyCode::Char('o') => {
+                if let Some(s) = &mut self.session {
+                    let progress = s.progress.clone();
+                    s.tree.toggle_expand_all(&progress);
+                }
+                Ok(false)
+            }
             KeyCode::Char('.') => {
                 if let Some(s) = &mut self.session {
                     let progress = s.progress.clone();

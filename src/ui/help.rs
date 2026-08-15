@@ -27,7 +27,7 @@ pub enum HelpContext {
 
 pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext, t: &UiStrings) {
     let card_height = match ctx {
-        HelpContext::Tree => 32,
+        HelpContext::Tree => 34,
         HelpContext::Home => 26,
         _ => 20,
     };
@@ -109,6 +109,7 @@ fn context_lines(ctx: HelpContext, t: &UiStrings) -> Vec<Line<'static>> {
             hint("x/X", t.skip_reset),
             hint(".", t.show_hide_excluded),
             hint("h/l", t.fold),
+            hint("o", t.expand_or_collapse),
             hint("e", t.how_to_proceed),
             hint("t", t.file_types),
         ],
