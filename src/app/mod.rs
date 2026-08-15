@@ -220,13 +220,15 @@ impl App {
             if self.place == Place::Tree {
                 if let Some(s) = &mut self.session {
                     if let Ok(size) = guard.terminal().size() {
-                        s.tree.visible_rows = list_height(ratatui::layout::Rect {
-                            x: 0,
-                            y: 0,
-                            width: size.width,
-                            height: size.height,
-                        })
-                        .max(1);
+                        s.tree.set_visible_rows(
+                            list_height(ratatui::layout::Rect {
+                                x: 0,
+                                y: 0,
+                                width: size.width,
+                                height: size.height,
+                            })
+                            .max(1),
+                        );
                     }
                 }
             }

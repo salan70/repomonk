@@ -130,7 +130,16 @@ impl TreeView {
             hidden_paths,
         };
         view.jump_recommend();
+        // The real list height is unknown until the first draw, so leave the scroll
+        // at the top and let `set_visible_rows` scroll only as far as it must.
+        view.offset = 0;
         view
+    }
+
+    /// Called with the drawn list height before each frame.
+    pub fn set_visible_rows(&mut self, height: usize) {
+        self.visible_rows = height;
+        self.clamp_offset();
     }
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
@@ -1133,6 +1142,21 @@ mod tests {
             let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
             line.contains(&selected.name)
         })
+    }
+
+    #[test]
+    fn opening_does_not_pin_the_cursor_to_the_top() {
+        let progress = progress_with_excluded_above();
+        let (width, height) = (60, 20);
+
+        // `src/a00.rs` is the recommended file, so it sits at its natural depth in
+        // the list. Opening must not scroll it up to the first line.
+        let mut tree = tree_view(&progress, true);
+        tree.set_visible_rows(list_height(Rect::new(0, 0, width, height)));
+
+        assert_eq!(tree.selected_path().as_deref(), Some("src/a00.rs"));
+        assert_eq!(tree.offset, 0);
+        assert_eq!(drawn_cursor_line(&tree, width, height), Some(tree.selected));
     }
 
     #[test]
