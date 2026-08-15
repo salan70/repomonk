@@ -26,9 +26,10 @@ pub enum HelpContext {
 }
 
 pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext, t: &UiStrings) {
+    // Home and Tree both carry the legend, so the extra `◐` row costs each one line.
     let card_height = match ctx {
-        HelpContext::Tree => 34,
-        HelpContext::Home => 26,
+        HelpContext::Tree => 35,
+        HelpContext::Home => 27,
         _ => 20,
     };
     let card = theme::centered_rect(area, area.width.saturating_sub(8).min(72), card_height);
@@ -54,6 +55,7 @@ pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext, t: &UiStrings)
         lines.push(section(t.section_legend));
         lines.extend([
             hint("✓", t.legend_done),
+            hint("◐", t.legend_in_progress),
             hint("○", t.legend_todo),
             hint("·", t.legend_skipped),
             hint("█░", t.legend_dir_progress),

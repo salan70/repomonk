@@ -34,6 +34,11 @@ pub struct TreeRow {
     pub skip_reason: Option<SkipReason>,
     /// True when the user skipped this file with `x`.
     pub manual_skip: bool,
+    /// True when a saved checkpoint exists: typed into, but not finished.
+    ///
+    /// Derived from the checkpoint itself rather than `progress`, which counts
+    /// accepted newlines and so still reads `(0, n)` part-way through line one.
+    pub in_progress: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +60,9 @@ pub struct TreeView {
     pub file_counts: (usize, usize),
     /// Line count of the recommended file, for the Next row.
     pub recommend_lines: Option<usize>,
+    /// True when the recommended file has a saved checkpoint, so the Next row
+    /// offers to resume rather than to start.
+    pub recommend_resume: bool,
     pub hide_skipped: bool,
     /// Incremental file filter (`/` on Tree).
     pub filter: String,
@@ -86,13 +94,7 @@ impl TreeView {
         hidden_paths: std::collections::HashSet<String>,
     ) -> Self {
         let recommend = recommended_path(progress, flow.as_ref());
-        let recommend_lines = recommend.as_ref().and_then(|path| {
-            progress
-                .files
-                .iter()
-                .find(|f| f.relative_path == *path)
-                .map(|f| f.total_lines())
-        });
+        let (recommend_lines, recommend_resume) = recommend_facts(progress, recommend.as_deref());
         let flow_counts = flow
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
@@ -118,6 +120,7 @@ impl TreeView {
             overall: (root.completed_lines, root.total_lines),
             file_counts: (root.done_files, root.done_files + root.todo_files),
             recommend_lines,
+            recommend_resume,
             hide_skipped,
             filter: String::new(),
             filter_editing: false,
@@ -144,13 +147,10 @@ impl TreeView {
 
     pub fn refresh_rows(&mut self, progress: &RepoProgress) {
         self.recommend = recommended_path(progress, self.flow.as_ref());
-        self.recommend_lines = self.recommend.as_ref().and_then(|path| {
-            progress
-                .files
-                .iter()
-                .find(|f| f.relative_path == *path)
-                .map(|f| f.total_lines())
-        });
+        let (recommend_lines, recommend_resume) =
+            recommend_facts(progress, self.recommend.as_deref());
+        self.recommend_lines = recommend_lines;
+        self.recommend_resume = recommend_resume;
         self.flow_counts = self
             .flow
             .as_ref()
@@ -287,6 +287,20 @@ impl TreeView {
         self.recommend
             .clone()
             .is_some_and(|path| self.jump_to_path(&path))
+    }
+
+    /// Rebuild the tree and put the cursor on `path`, opening its ancestors first.
+    ///
+    /// The order matters: `jump_to_path` only scans visible rows, so the ancestors
+    /// have to be opened before the rebuild, and `refresh_rows` recomputes
+    /// `selected` from the previous row, so the jump has to come after it.
+    ///
+    /// Returns false when the path is filtered out or absent, leaving the cursor
+    /// wherever `refresh_rows` put it.
+    pub fn reveal_path(&mut self, progress: &RepoProgress, path: &str) -> bool {
+        open_ancestors(&mut self.opened, path);
+        self.refresh_rows(progress);
+        self.jump_to_path(path)
     }
 
     pub fn next_match(&mut self, backward: bool) {
@@ -444,30 +458,33 @@ fn header_label(view: &TreeView, t: &UiStrings) -> String {
 fn next_line(view: &TreeView, t: &UiStrings) -> Line<'static> {
     match &view.recommend {
         Some(path) => {
+            // A saved checkpoint means Enter picks up where the cursor stopped.
+            let start_hint = if view.recommend_resume {
+                t.enter_to_resume
+            } else {
+                t.enter_to_start
+            };
             let text = if view.flow.is_some() {
                 if let Some(step) = view.flow_step_number(path) {
                     format!(
-                        " ▸ {}  {} {step}{sep}{path}{sep}{}",
+                        " ▸ {}  {} {step}{sep}{path}{sep}{start_hint}",
                         t.next_label,
                         t.next_step,
-                        t.enter_to_start,
                         sep = theme::FIELD_SEP
                     )
                 } else {
                     format!(
-                        " ▸ {}  {path}{sep}{}",
+                        " ▸ {}  {path}{sep}{start_hint}",
                         t.next_label,
-                        t.enter_to_start,
                         sep = theme::FIELD_SEP
                     )
                 }
             } else {
                 let lines = view.recommend_lines.unwrap_or(0);
                 format!(
-                    " ▸ {}  {path}{sep}{lines} {}{sep}{}",
+                    " ▸ {}  {path}{sep}{lines} {}{sep}{start_hint}",
                     t.next_label,
                     t.lines,
-                    t.enter_to_start,
                     sep = theme::FIELD_SEP
                 )
             };
@@ -484,6 +501,22 @@ fn next_line(view: &TreeView, t: &UiStrings) -> Line<'static> {
         )),
         None => Line::from(""),
     }
+}
+
+/// `(line count, has a saved checkpoint)` for the recommended file.
+fn recommend_facts(progress: &RepoProgress, path: Option<&str>) -> (Option<usize>, bool) {
+    let Some(file) = path.and_then(|path| {
+        progress
+            .files
+            .iter()
+            .find(|f| f.relative_path.as_str() == path)
+    }) else {
+        return (None, false);
+    };
+    (
+        Some(file.total_lines()),
+        file.chunks.iter().any(|c| c.checkpoint.is_some()),
+    )
 }
 
 fn recommended_path(progress: &RepoProgress, flow: Option<&FlowOrder>) -> Option<String> {
@@ -581,6 +614,7 @@ fn flatten(
                         status: None,
                         skip_reason: None,
                         manual_skip: false,
+                        in_progress: false,
                     });
                     emitted_dirs.insert(acc.clone());
                 }
@@ -606,6 +640,8 @@ fn flatten(
                     status: Some(status),
                     skip_reason,
                     manual_skip,
+                    in_progress: status != FileStatus::Skipped
+                        && f.chunks.iter().any(|c| c.checkpoint.is_some()),
                 });
             }
         }
@@ -1036,6 +1072,7 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16, t: &UiStrings) -> Line<'
             let status = row.status.unwrap_or(FileStatus::Todo);
             let (mark, mark_color, name_color) = match status {
                 FileStatus::Done => ("✓", theme::GREEN, theme::MUTED),
+                FileStatus::Todo if row.in_progress => ("◐", theme::YELLOW, theme::FG),
                 FileStatus::Todo => ("○", theme::FG, theme::FG),
                 FileStatus::Skipped => ("·", theme::MUTED, theme::MUTED),
             };
@@ -1166,6 +1203,91 @@ mod tests {
         tree.selected = tree.rows.len() - 1;
         assert!(tree.jump_recommend());
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
+    }
+
+    /// Give a file a checkpoint stopped before the first newline, so
+    /// `completed_lines()` is still 0 and only the checkpoint itself marks it.
+    fn with_checkpoint(file: &mut FileProgress, cursor: usize) {
+        file.chunks[0].checkpoint = Some(crate::domain::content::TypingCheckpoint {
+            chunk_id: 1,
+            cursor,
+            keystrokes: cursor as u32,
+            misses: 0,
+            elapsed_ms: 1_000,
+            started_at: "2026-08-15T00:00:00Z".into(),
+            auto_indent: false,
+        });
+    }
+
+    #[test]
+    fn row_marks_partially_typed_file_as_in_progress() {
+        let mut progress = progress();
+        progress.files[0].chunks[0].chunk.normalized = "one\ntwo".into();
+        with_checkpoint(&mut progress.files[0], 2);
+        let tree = tree_view(&progress, false);
+        let row = tree
+            .rows
+            .iter()
+            .find(|r| matches!(&r.kind, TreeRowKind::File { path } if path == "src/a.rs"))
+            .expect("file row");
+        // No line has been finished yet, so the line counts alone cannot tell
+        // this apart from an untouched file.
+        assert_eq!(row.progress, Some((0, 2)));
+        assert!(row.in_progress);
+        let text = row_line(row, &tree, 80, en())
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<String>();
+        assert!(text.contains('◐'), "{text}");
+        assert!(!text.contains('○'), "{text}");
+    }
+
+    #[test]
+    fn next_line_says_resume_when_the_recommendation_has_a_checkpoint() {
+        let mut progress = progress();
+        let tree = tree_view(&progress, false);
+        assert_eq!(tree.recommend.as_deref(), Some("src/a.rs"));
+        assert!(!tree.recommend_resume);
+        let text: String = next_line(&tree, en())
+            .spans
+            .iter()
+            .map(|s| &*s.content)
+            .collect();
+        assert!(text.contains(en().enter_to_start), "{text}");
+
+        with_checkpoint(&mut progress.files[0], 1);
+        let tree = tree_view(&progress, false);
+        assert!(tree.recommend_resume);
+        let text: String = next_line(&tree, en())
+            .spans
+            .iter()
+            .map(|s| &*s.content)
+            .collect();
+        assert!(text.contains(en().enter_to_resume), "{text}");
+        assert!(!text.contains(en().enter_to_start), "{text}");
+    }
+
+    #[test]
+    fn reveal_path_opens_ancestors_and_selects() {
+        let progress = progress();
+        let mut tree = tree_view(&progress, false);
+        tree.opened.clear();
+        tree.refresh_rows(&progress);
+        assert!(
+            !tree.jump_to_path("src/b.rs"),
+            "the row must be hidden for this test to mean anything"
+        );
+        assert!(tree.reveal_path(&progress, "src/b.rs"));
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/b.rs"));
+    }
+
+    #[test]
+    fn reveal_path_reports_failure_when_filtered_out() {
+        let progress = progress();
+        let mut tree = tree_view(&progress, false);
+        tree.filter = "b.rs".into();
+        assert!(!tree.reveal_path(&progress, "lib.rs"));
     }
 
     #[test]
