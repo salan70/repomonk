@@ -4,8 +4,9 @@ use std::process::ExitCode;
 use clap::Parser;
 use repomonk::app::{App, AppConfig};
 use repomonk::cli::Cli;
-use repomonk::config::{default_config_path, load as load_user_config};
+use repomonk::config::{default_config_path, load as load_user_config, UiLanguage};
 use repomonk::store::{purge, DataPaths};
+use repomonk::ui::i18n::strings;
 use repomonk::Error;
 
 fn main() -> ExitCode {
@@ -13,10 +14,19 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(Error::PurgeCancelled) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("error: {err}");
+            let t = strings(current_language());
+            eprintln!("{}: {}", t.error_prefix, t.format_error(&err));
             ExitCode::from(err.exit_code() as u8)
         }
     }
+}
+
+fn current_language() -> UiLanguage {
+    default_config_path()
+        .ok()
+        .and_then(|path| load_user_config(&path).ok())
+        .map(|cfg| cfg.ui.language)
+        .unwrap_or_default()
 }
 
 fn run() -> repomonk::Result<()> {
@@ -30,7 +40,7 @@ fn run() -> repomonk::Result<()> {
     let paths = resolve_paths(&cli)?;
 
     if cli.purge {
-        return run_purge(&paths, cli.yes);
+        return run_purge(&paths, cli.yes, current_language());
     }
 
     let config_path = default_config_path()?;
@@ -68,21 +78,22 @@ fn resolve_paths(cli: &Cli) -> repomonk::Result<DataPaths> {
     Ok(paths)
 }
 
-fn run_purge(paths: &DataPaths, yes: bool) -> repomonk::Result<()> {
-    println!("This will delete repomonk-managed data:");
-    println!("  cache: {}", paths.cache_dir.display());
-    println!("  data:  {}", paths.data_dir.display());
+fn run_purge(paths: &DataPaths, yes: bool, language: UiLanguage) -> repomonk::Result<()> {
+    let t = strings(language);
+    println!("{}", t.purge_intro);
+    println!("  {}: {}", t.purge_cache, paths.cache_dir.display());
+    println!("  {}:  {}", t.purge_data, paths.data_dir.display());
     if !yes {
-        print!("Type 'yes' to confirm: ");
+        print!("{}", t.purge_confirm);
         io::stdout().flush()?;
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
         if line.trim() != "yes" {
-            println!("cancelled");
+            println!("{}", t.purge_cancelled);
             return Err(Error::PurgeCancelled);
         }
     }
     purge(paths)?;
-    println!("purged");
+    println!("{}", t.purge_done);
     Ok(())
 }

@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
+use crate::ui::i18n::UiStrings;
 use crate::ui::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +25,7 @@ pub enum HelpContext {
     Flow,
 }
 
-pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
+pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext, t: &UiStrings) {
     let card_height = match ctx {
         HelpContext::Tree => 32,
         HelpContext::Home => 26,
@@ -32,38 +33,38 @@ pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
     };
     let card = theme::centered_rect(area, area.width.saturating_sub(8).min(72), card_height);
     frame.render_widget(Clear, card);
-    let block = theme::bordered_block(theme::title_line("Help"));
+    let block = theme::bordered_block(theme::title_line(t.title_help));
     let inner = block.inner(card);
     frame.render_widget(block, card);
 
-    let mut lines = vec![section("here")];
-    lines.extend(context_lines(ctx));
+    let mut lines = vec![section(t.section_here)];
+    lines.extend(context_lines(ctx, t));
     if !matches!(ctx, HelpContext::Typing | HelpContext::Pause) {
         lines.push(Line::from(""));
-        lines.push(section("common"));
+        lines.push(section(t.section_common));
         lines.extend([
-            hint("?", "help"),
-            hint(",", "settings"),
-            hint("S", "stats"),
-            hint("Esc/q", "back / close"),
+            hint("?", t.help),
+            hint(",", t.settings),
+            hint("S", t.stats),
+            hint("Esc/q", t.back_close),
         ]);
     }
     if matches!(ctx, HelpContext::Home | HelpContext::Tree) {
         lines.push(Line::from(""));
-        lines.push(section("legend"));
+        lines.push(section(t.section_legend));
         lines.extend([
-            hint("✓", "done"),
-            hint("○", "todo"),
-            hint("·", "skipped"),
-            hint("█░", "dir progress"),
-            hint("— reason", "why skipped"),
-            hint("▸ Next", "next file"),
-            hint("—", "outside flow"),
-            hint("123", "flow order"),
+            hint("✓", t.legend_done),
+            hint("○", t.legend_todo),
+            hint("·", t.legend_skipped),
+            hint("█░", t.legend_dir_progress),
+            hint("— reason", t.legend_why_skipped),
+            hint("▸ Next", t.legend_next_file),
+            hint("—", t.legend_outside_flow),
+            hint("123", t.legend_flow_order),
         ]);
     }
     lines.push(Line::from(""));
-    lines.push(theme::key_hints(&[("Esc", "close"), ("?", "close")]));
+    lines.push(theme::key_hints(&[("Esc", t.close), ("?", t.close)]));
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -89,69 +90,69 @@ fn hint(key: &str, desc: &str) -> Line<'static> {
     ])
 }
 
-fn context_lines(ctx: HelpContext) -> Vec<Line<'static>> {
+fn context_lines(ctx: HelpContext, t: &UiStrings) -> Vec<Line<'static>> {
     match ctx {
         HelpContext::Home => vec![
-            hint("Enter", "open"),
-            hint("j/k", "select"),
-            hint("g/G", "first / last"),
-            hint("/", "search"),
-            hint("q", "quit"),
+            hint("Enter", t.open),
+            hint("j/k", t.select),
+            hint("g/G", t.first_last),
+            hint("/", t.search),
+            hint("q", t.quit),
         ],
         HelpContext::Tree => vec![
-            hint("Enter", "open"),
-            hint("j/k", "move"),
-            hint("g/G", "first / last"),
-            hint("Ctrl-d/u", "half page"),
-            hint("Tab", "next file"),
-            hint("/", "filter"),
-            hint("x/X", "skip / reset"),
-            hint(".", "show / hide excluded"),
-            hint("h/l", "fold"),
-            hint("e", "how to proceed"),
-            hint("t", "file types"),
+            hint("Enter", t.open),
+            hint("j/k", t.move_),
+            hint("g/G", t.first_last),
+            hint("Ctrl-d/u", t.half_page),
+            hint("Tab", t.next_file),
+            hint("/", t.filter),
+            hint("x/X", t.skip_reset),
+            hint(".", t.show_hide_excluded),
+            hint("h/l", t.fold),
+            hint("e", t.how_to_proceed),
+            hint("t", t.file_types),
         ],
         HelpContext::Typing => vec![
-            hint("keys", "type the source"),
-            hint("Esc", "pause"),
-            hint("Ctrl-C", "quit"),
+            hint("keys", t.type_source),
+            hint("Esc", t.pause),
+            hint("Ctrl-C", t.quit),
         ],
         HelpContext::Result => vec![
-            hint("Enter", "next"),
-            hint("r", "retry"),
-            hint("t/Esc", "tree"),
+            hint("Enter", t.next),
+            hint("r", t.retry),
+            hint("t/Esc", t.tree),
         ],
         HelpContext::Search => vec![
-            hint("Enter", "open"),
-            hint("↑/↓", "select"),
-            hint("Ctrl-n/p", "select"),
-            hint("Esc", "close"),
+            hint("Enter", t.open),
+            hint("↑/↓", t.select),
+            hint("Ctrl-n/p", t.select),
+            hint("Esc", t.close),
         ],
         HelpContext::Settings => vec![
-            hint("j/k", "move"),
-            hint("h/l", "adjust"),
-            hint("Enter", "toggle"),
-            hint("Esc", "close"),
+            hint("j/k", t.move_),
+            hint("h/l", t.adjust),
+            hint("Enter", t.toggle),
+            hint("Esc", t.close),
         ],
         HelpContext::Stats => vec![
-            hint("j/k", "scroll"),
-            hint("g/G", "first / last"),
-            hint("Esc", "close"),
+            hint("j/k", t.scroll),
+            hint("g/G", t.first_last),
+            hint("Esc", t.close),
         ],
         HelpContext::Pause => vec![
-            hint("Esc/Enter", "resume"),
-            hint("r", "retry"),
-            hint("t", "tree"),
+            hint("Esc/Enter", t.resume),
+            hint("r", t.retry),
+            hint("t", t.tree),
         ],
         HelpContext::FileTypes => vec![
-            hint("j/k", "move"),
-            hint("Space/Enter", "cycle: on / off / hide"),
-            hint("Esc/q/t", "apply & close"),
+            hint("j/k", t.move_),
+            hint("Space/Enter", t.cycle_on_off_hide),
+            hint("Esc/q/t", t.apply_close),
         ],
         HelpContext::Flow => vec![
-            hint("j/k", "move"),
-            hint("Enter/Space", "select"),
-            hint("Esc/q/e", "apply & close"),
+            hint("j/k", t.move_),
+            hint("Enter/Space", t.select),
+            hint("Esc/q/e", t.apply_close),
         ],
     }
 }

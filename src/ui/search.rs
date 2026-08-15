@@ -17,6 +17,8 @@ pub struct SearchHit {
     /// Value passed to `App::open` / resolve.
     pub input: String,
     pub score: u32,
+    /// When true, the Search modal appends a localized "open" suffix.
+    pub open_hint: bool,
 }
 
 /// Modal editing state.
@@ -73,9 +75,10 @@ pub fn build_hits(query: &str, recent: &[RecentRepo], cache_dir: &Path) -> Vec<S
     // Exact GitHub form is always offered as the top synthetic hit when it parses.
     if let Some(gh) = parse_github_input(q) {
         hits.push(SearchHit {
-            label: format!("{}  (open)", gh.display_name()),
+            label: gh.display_name(),
             input: gh.display_name(),
             score: u32::MAX,
+            open_hint: true,
         });
     }
 
@@ -102,6 +105,7 @@ pub fn build_hits(query: &str, recent: &[RecentRepo], cache_dir: &Path) -> Vec<S
                 label,
                 input,
                 score,
+                open_hint: false,
             })
         })
         .collect();

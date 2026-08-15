@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use crate::ui::i18n::{display_width, UiStrings};
 use crate::ui::theme;
 
 pub const LOGO: [&str; 6] = [
@@ -127,7 +128,7 @@ pub fn draw_animated_logo(frame: &mut Frame, area: Rect, elapsed_ms: u64) {
     frame.render_widget(Paragraph::new(logo_lines(elapsed_ms)), target);
 }
 
-pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &str) {
+pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &str, t: &UiStrings) {
     theme::fill_background(frame, area);
     let state = splash_frame(elapsed_ms);
 
@@ -138,15 +139,15 @@ pub fn draw_splash(frame: &mut Frame, area: Rect, elapsed_ms: u64, repo_name: &s
     let mut lines = logo_lines(elapsed_ms);
     lines.push(Line::from(""));
     let tagline = format!("v{}  —  {}", env!("CARGO_PKG_VERSION"), repo_name);
-    let pad = width.saturating_sub(tagline.chars().count()) / 2;
+    let pad = width.saturating_sub(display_width(&tagline)) / 2;
     lines.push(Line::from(Span::styled(
         format!("{}{}", " ".repeat(pad), tagline),
         Style::default()
             .fg(theme::lerp(theme::BG, theme::MUTED, state.tagline_alpha))
             .bg(theme::BG),
     )));
-    let hint = "press any key";
-    let pad = width.saturating_sub(hint.chars().count()) / 2;
+    let hint = t.splash_press_key;
+    let pad = width.saturating_sub(display_width(hint)) / 2;
     lines.push(Line::from(Span::styled(
         format!("{}{}", " ".repeat(pad), hint),
         Style::default()

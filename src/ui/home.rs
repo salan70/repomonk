@@ -7,6 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 
 use crate::store::{GlobalSummary, RecentRepo};
+use crate::ui::i18n::UiStrings;
 use crate::ui::search::SearchState;
 use crate::ui::splash::{self, LOGO};
 use crate::ui::theme;
@@ -50,7 +51,13 @@ impl HomeView {
     }
 }
 
-pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms: u64) {
+pub fn draw_home(
+    frame: &mut Frame,
+    area: Rect,
+    view: &HomeView,
+    logo_elapsed_ms: u64,
+    t: &UiStrings,
+) {
     theme::fill_background(frame, area);
 
     let chunks = Layout::default()
@@ -65,8 +72,8 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms
         .split(area);
 
     splash::draw_animated_logo(frame, chunks[0], logo_elapsed_ms);
-    draw_summary(frame, chunks[1], &view.summary);
-    draw_recent(frame, chunks[2], view);
+    draw_summary(frame, chunks[1], &view.summary, t);
+    draw_recent(frame, chunks[2], view, t);
     if let Some(err) = &view.error {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -78,7 +85,7 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms
     } else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "  Select a recent repo or press / to search",
+                t.home_hint,
                 Style::default().fg(theme::MUTED).bg(theme::BG),
             ))),
             chunks[3],
@@ -86,20 +93,26 @@ pub fn draw_home(frame: &mut Frame, area: Rect, view: &HomeView, logo_elapsed_ms
     }
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("Enter", "open"),
-            ("j/k", "select"),
-            ("/", "search"),
-            ("q", "quit"),
-            ("?", "help"),
+            ("Enter", t.open),
+            ("j/k", t.select),
+            ("/", t.search),
+            ("q", t.quit),
+            ("?", t.help),
         ])),
         chunks[4],
     );
 }
 
-fn draw_summary(frame: &mut Frame, area: Rect, summary: &GlobalSummary) {
+fn draw_summary(frame: &mut Frame, area: Rect, summary: &GlobalSummary, t: &UiStrings) {
     let text = format!(
-        "  Summary  ·  {} files done  ·  {} chunks done  ·  {} day streak",
-        summary.completed_files, summary.completed_chunks, summary.streak_days
+        "  {}  ·  {} {}  ·  {} {}  ·  {} {}",
+        t.summary,
+        summary.completed_files,
+        t.files_done,
+        summary.completed_chunks,
+        t.chunks_done,
+        summary.streak_days,
+        t.day_streak
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -111,15 +124,15 @@ fn draw_summary(frame: &mut Frame, area: Rect, summary: &GlobalSummary) {
     );
 }
 
-fn draw_recent(frame: &mut Frame, area: Rect, view: &HomeView) {
-    let block = theme::bordered_block(theme::title_line("Recent"));
+fn draw_recent(frame: &mut Frame, area: Rect, view: &HomeView, t: &UiStrings) {
+    let block = theme::bordered_block(theme::title_line(t.title_recent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if view.recent.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "No repositories yet — press s to open one",
+                t.home_empty,
                 Style::default().fg(theme::MUTED),
             )))
             .alignment(Alignment::Center),
@@ -131,7 +144,7 @@ fn draw_recent(frame: &mut Frame, area: Rect, view: &HomeView) {
     let items: Vec<ListItem> = view
         .recent
         .iter()
-        .map(|r| ListItem::new(recent_line(r)))
+        .map(|r| ListItem::new(recent_line(r, t)))
         .collect();
     let mut state = ListState::default();
     state.select(Some(view.selected.min(view.recent.len() - 1)));
@@ -141,7 +154,7 @@ fn draw_recent(frame: &mut Frame, area: Rect, view: &HomeView) {
     frame.render_stateful_widget(list, inner, &mut state);
 }
 
-fn recent_line(r: &RecentRepo) -> Line<'static> {
+fn recent_line(r: &RecentRepo, t: &UiStrings) -> Line<'static> {
     let ratio = if r.total_lines == 0 {
         0.0
     } else {
@@ -155,7 +168,10 @@ fn recent_line(r: &RecentRepo) -> Line<'static> {
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("  {bar} {pct}  {}/{} lines", r.done_lines, r.total_lines),
+            format!(
+                "  {bar} {pct}  {}/{} {}",
+                r.done_lines, r.total_lines, t.lines
+            ),
             Style::default().fg(theme::MUTED),
         ),
     ])
@@ -175,14 +191,14 @@ fn progress_bar(ratio: f64, width: usize) -> String {
 }
 
 /// Draw the Search modal centered over the home screen.
-pub fn draw_search_modal(frame: &mut Frame, area: Rect, search: &SearchState) {
+pub fn draw_search_modal(frame: &mut Frame, area: Rect, search: &SearchState, t: &UiStrings) {
     let modal = theme::centered_rect(area, area.width.saturating_sub(8).min(72), 16);
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::CYAN).bg(theme::BG))
         .style(theme::base_style())
-        .title(theme::title_line("Search"));
+        .title(theme::title_line(t.title_search));
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
 
@@ -209,7 +225,7 @@ pub fn draw_search_modal(frame: &mut Frame, area: Rect, search: &SearchState) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "GitHub URL / owner/repo, or fuzzy match local history",
+            t.search_hint,
             Style::default().fg(theme::MUTED),
         ))),
         panes[1],
@@ -220,7 +236,15 @@ pub fn draw_search_modal(frame: &mut Frame, area: Rect, search: &SearchState) {
         .iter()
         .map(|h| {
             ListItem::new(Line::from(Span::styled(
-                format!(" {}", h.label),
+                format!(
+                    " {}{}",
+                    h.label,
+                    if h.open_hint {
+                        t.search_open_suffix
+                    } else {
+                        ""
+                    }
+                ),
                 Style::default().fg(theme::FG),
             )))
         })
@@ -238,16 +262,16 @@ pub fn draw_search_modal(frame: &mut Frame, area: Rect, search: &SearchState) {
     );
 
     let confirm_hint = if search.can_confirm() {
-        ("Enter", "open")
+        ("Enter", t.open)
     } else {
-        ("Enter", "need a match")
+        ("Enter", t.need_a_match)
     };
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
             confirm_hint,
-            ("↑/↓", "select"),
-            ("Esc", "close"),
-            ("?", "help"),
+            ("↑/↓", t.select),
+            ("Esc", t.close),
+            ("?", t.help),
         ])),
         panes[3],
     );

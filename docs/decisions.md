@@ -761,3 +761,29 @@ Tree を見ながら一時的に確認する操作と、既定を変える操作
 - Settings を開いて閉じると `apply_live_settings` が config 値で上書きするため、
   `.` の切り替え結果は失われる。初期値を持つのは config 側という整理に従う。
 - `docs/product-requirements.md` §9.2 と §11 を更新する。
+
+## D-029: TUIの表示言語は日本語既定で、英語へ切り替えられる
+
+- 状態: 採用
+- 日付: 2026-08-15
+
+### 決定
+
+- 画面文言、Help、対象外理由の表示、purge確認、実行時エラー表示の既定は日本語とする。
+- `~/.config/repomonk/config.toml` の `[ui] language = "ja" | "en"` と Settings の
+  `language` で切り替える。欠落時は `ja`。再スキャンは不要で、Settings を閉じた時点で
+  現在のセッションへ即時反映する。
+- CLI の clap `--help` は英語のままにする。purge の確認語は D-010 どおり `yes` 固定。
+- SQLite の `skip_reason` や entry 由来キーなど永続化・照合用の文字列は英語のままにし、
+  表示だけ UI 層で翻訳する。
+- 写経本文の正規化（非ASCII行の除外）は変更しない。日本語コメントを打鍵対象にはしない。
+
+### 理由
+
+文書と想定利用者は日本語だが、TUI が英語のままだと操作が読めない。一方で英語UIを
+残し、永続化キーと写経判定は言語に依存させないことで、既存進捗と抽出規則を壊さない。
+
+### 影響
+
+- `docs/product-requirements.md` §9.4 と §11 を更新する。
+- `ui::i18n` に文言カタログを置き、`UserConfig.ui.language` から描画へ渡す。

@@ -9,6 +9,7 @@ use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::store::{GlobalSummary, RecentRepo};
+use crate::ui::i18n::UiStrings;
 use crate::ui::theme;
 
 #[derive(Debug, Clone)]
@@ -50,10 +51,10 @@ fn dialog_rect(area: Rect, repo_count: usize) -> Rect {
     theme::centered_rect(area, width, height)
 }
 
-pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
+pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView, t: &UiStrings) {
     let card = dialog_rect(area, view.repos.len());
     frame.render_widget(Clear, card);
-    let block = theme::bordered_block(theme::title_line("Stats"));
+    let block = theme::bordered_block(theme::title_line(t.title_stats));
     let inner = block.inner(card);
     frame.render_widget(block, card);
 
@@ -68,30 +69,39 @@ pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
 
     let summary_lines = vec![
         Line::from(Span::styled(
-            " Achievement",
+            format!(" {}", t.stats_achievement),
             Style::default()
                 .fg(theme::BLUE)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  files done   ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                format!("  {:<14}", t.stats_files_done),
+                Style::default().fg(theme::MUTED),
+            ),
             Span::styled(
                 format!("{}", view.summary.completed_files),
                 Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  chunks done  ", Style::default().fg(theme::MUTED)),
+            Span::styled(
+                format!("  {:<14}", t.stats_chunks_done),
+                Style::default().fg(theme::MUTED),
+            ),
             Span::styled(
                 format!("{}", view.summary.completed_chunks),
                 Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  streak       ", Style::default().fg(theme::MUTED)),
             Span::styled(
-                format!("{} days", view.summary.streak_days),
+                format!("  {:<14}", t.stats_streak),
+                Style::default().fg(theme::MUTED),
+            ),
+            Span::styled(
+                format!("{} {}", view.summary.streak_days, t.stats_days),
                 Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -100,7 +110,7 @@ pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
 
     let items: Vec<ListItem> = if view.repos.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
-            "  (no repositories)",
+            t.stats_empty,
             Style::default().fg(theme::MUTED),
         )))]
     } else {
@@ -119,10 +129,11 @@ pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
                     ),
                     Span::styled(
                         format!(
-                            "{:>3.0}%  {}/{} lines",
+                            "{:>3.0}%  {}/{} {}",
                             ratio * 100.0,
                             r.done_lines,
-                            r.total_lines
+                            r.total_lines,
+                            t.lines
                         ),
                         Style::default().fg(theme::MUTED),
                     ),
@@ -144,9 +155,9 @@ pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
 
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("j/k", "scroll"),
-            ("Esc", "close"),
-            ("?", "help"),
+            ("j/k", t.scroll),
+            ("Esc", t.close),
+            ("?", t.help),
         ])),
         panes[2],
     );

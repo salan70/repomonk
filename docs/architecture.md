@@ -54,6 +54,7 @@ src/
     fx.rs              カーソル移動とブレイズ軌跡の演出状態機械
     highlight.rs       Typing本文の字句ハイライトと色配列
     theme.rs           Tokyo Night配色
+    i18n.rs            TUI文言カタログ（ja / en）
 tests/
   fixtures/            小さな疑似リポジトリ
   cli.rs

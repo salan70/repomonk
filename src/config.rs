@@ -10,10 +10,51 @@ use crate::Error;
 /// Top-level user settings matching product-requirements §11.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserConfig {
+    #[serde(default)]
+    pub ui: UiConfig,
     pub content: ContentConfig,
     pub typing: TypingConfig,
     pub progress: ProgressConfig,
     pub fx: FxConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub language: UiLanguage,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            language: UiLanguage::Ja,
+        }
+    }
+}
+
+/// Display language for the TUI and user-facing messages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiLanguage {
+    #[default]
+    Ja,
+    En,
+}
+
+impl UiLanguage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ja => "ja",
+            Self::En => "en",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Ja => Self::En,
+            Self::En => Self::Ja,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -97,6 +138,7 @@ pub enum FxPreset {
 impl Default for UserConfig {
     fn default() -> Self {
         Self {
+            ui: UiConfig::default(),
             content: ContentConfig {
                 include_imports: false,
                 include_doc_comments: true,
@@ -275,7 +317,8 @@ fn parse_toml(text: &str, path: &Path) -> crate::Result<UserConfig> {
             "invalid config at {}:\n  {e}\nFix: correct the value to match docs/product-requirements.md §11 \
              (booleans true/false, tab_width 1–8, mode \"manual\"|\"flow\", \
              dependency_direction \"top_down\"|\"bottom_up\", intensity \"off\"|\"subtle\"|\"normal\"|\"high\", \
-             preset \"classic\"|\"blaze\"|\"smear\"|\"ripple\"|\"fireworks\")",
+             preset \"classic\"|\"blaze\"|\"smear\"|\"ripple\"|\"fireworks\", \
+             language \"ja\"|\"en\")",
             path.display()
         ))
     })?;
@@ -347,6 +390,32 @@ mod tests {
         assert!(loaded.typing.show_live_speed);
         assert_eq!(loaded.fx.intensity, FxIntensity::Subtle);
         assert_eq!(loaded.fx.preset, FxPreset::Fireworks);
+    }
+
+    #[test]
+    fn missing_ui_section_defaults_to_japanese() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut text = toml::to_string_pretty(&UserConfig::default()).unwrap();
+        if let Some(idx) = text.find("[ui]") {
+            let rest = &text[idx + 4..];
+            let next = rest.find("\n[").map(|i| idx + 4 + i).unwrap_or(text.len());
+            text.replace_range(idx..next, "");
+        }
+        fs::write(&path, text).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.ui.language, UiLanguage::Ja);
+    }
+
+    #[test]
+    fn language_en_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = UserConfig::default();
+        cfg.ui.language = UiLanguage::En;
+        save(&path, &cfg).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.ui.language, UiLanguage::En);
     }
 
     #[test]

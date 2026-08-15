@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::domain::content::{FileStatus, RepoProgress};
 use crate::domain::file_type::{file_type_key, file_type_stats, FileTypePrefs, FileTypeState};
+use crate::ui::i18n::UiStrings;
 use crate::ui::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,10 +89,10 @@ fn dialog_rect(area: Rect, entry_count: usize) -> Rect {
     theme::centered_rect(area, width, height)
 }
 
-pub fn draw_file_types(frame: &mut Frame, area: Rect, view: &FileTypesView) {
+pub fn draw_file_types(frame: &mut Frame, area: Rect, view: &FileTypesView, t: &UiStrings) {
     let card = dialog_rect(area, view.entries.len());
     frame.render_widget(Clear, card);
-    let title = format!("File types — {}", view.repo_label);
+    let title = format!("{} — {}", t.title_file_types, view.repo_label);
     let block = theme::bordered_block(theme::title_line(&title));
     let inner = block.inner(card);
     frame.render_widget(block, card);
@@ -108,9 +109,13 @@ pub fn draw_file_types(frame: &mut Frame, area: Rect, view: &FileTypesView) {
             let (checkbox, color, suffix) = match entry.state {
                 FileTypeState::Included => ("[x]", theme::FG, ""),
                 FileTypeState::Excluded => ("[ ]", theme::MUTED, ""),
-                FileTypeState::Hidden => ("[-]", theme::MUTED, "  (hidden)"),
+                FileTypeState::Hidden => ("[-]", theme::MUTED, t.file_types_hidden),
             };
-            let plural = if entry.files == 1 { "file" } else { "files" };
+            let plural = if entry.files == 1 {
+                t.file_one
+            } else {
+                t.file_many
+            };
             let label = format!(
                 "  {checkbox} {:<14} {:>5} {plural}{suffix}",
                 entry.key, entry.files
@@ -133,9 +138,9 @@ pub fn draw_file_types(frame: &mut Frame, area: Rect, view: &FileTypesView) {
 
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("Space/Enter", "cycle"),
-            ("j/k", "move"),
-            ("Esc/q", "apply & close"),
+            ("Space/Enter", t.cycle),
+            ("j/k", t.move_),
+            ("Esc/q", t.apply_close),
         ])),
         panes[1],
     );

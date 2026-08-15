@@ -362,7 +362,7 @@ Chrome（リスト以外の固定行）は常に4行です。ヘッダ、Next、
 
 - `j`/`k`で移動、`h`/`l`で値変更、`Enter`/`Space`でトグルする。
 - `Esc`/`q`で閉じ、元の場所へ戻る。
-- 再スキャン不要な項目（`fx.*`、`typing.show_live_speed`、
+- 再スキャン不要な項目（`ui.language`、`fx.*`、`typing.show_live_speed`、
   `typing.syntax_highlight`、`progress.hide_skipped`）は閉じた時点で現在の
   セッションへ即時反映する。
 - 再スキャンが必要な項目は行ごとに「次回オープンから」と表示する。
@@ -409,9 +409,12 @@ Treeを背景に残したままの中央ダイアログとして、進行モー�
 ### 9.4 表示
 
 - フッターは原則4〜6個、左から「主要アクション → 移動 → 戻る → `?`」の順とする。
-  Treeだけは認知負荷を下げるため3個に絞る（`Enter open` · `j/k move` · `? more`。
-  フィルタ中は `Esc clear` · `n/N next` · `? more`）。残りのキーはHelpへ集約する（D-026）。
-- 動詞は`open`、`start`、`next`、`retry`、`back`、`close`、`quit`に統一する。
+  Treeだけは認知負荷を下げるため3個に絞る（日本語既定では `Enter 開く` · `j/k 移動` · `? 詳細`。
+  フィルタ中は `Esc 解除` · `n/N 次へ` · `? 詳細`。英語時は `open` / `move` / `more`、
+  `clear` / `next` / `more`）。残りのキーはHelpへ集約する（D-026）。
+- 動詞は言語ごとに固定する。日本語は開く、開始、次へ、再挑戦、戻る、閉じる、終了。
+  英語は`open`、`start`、`next`、`retry`、`back`、`close`、`quit`（D-029）。
+- 画面文言の既定は日本語とする。`[ui] language` と Settings で英語へ切り替えられる。
 - 現在地を上部に出す。Treeは`owner/repo`、TypingとResultは
   `owner/repo › src/main.rs`とする。
 
@@ -447,6 +450,9 @@ Treeを背景に残したままの中央ダイアログとして、進行モー�
 設定ファイルは`~/.config/repomonk/config.toml`です。
 
 ```toml
+[ui]
+language = "ja"
+
 [content]
 include_imports = false
 include_doc_comments = true
@@ -473,6 +479,11 @@ enabled = true
 intensity = "normal"
 preset = "classic"
 ```
+
+`ui.language` はTUIの表示言語です。既定は`ja`。`en`で英語UIへ切り替えます。
+欠落時も`ja`です。Settings（`,`）の変更は閉じた時点で現在のセッションへ即時反映します。
+CLIの`--help`は英語のままです。SQLiteへ保存する対象外理由などのキーは英語のままにし、
+表示だけ翻訳します。写経本文の非ASCII行除外は変えません（D-029）。
 
 `typing.syntax_highlight` はTyping画面の構文色を切り替えます。既定値は`true`で、
 無効にしても打鍵判定、進捗、演出には影響しません。

@@ -27,6 +27,7 @@ use crate::ui::fx::FxState;
 use crate::ui::help::{draw_help, HelpContext};
 use crate::ui::highlight::highlight_chars;
 use crate::ui::home::{draw_home, draw_search_modal, HomeView};
+use crate::ui::i18n::{strings, UiStrings};
 use crate::ui::pause::draw_pause;
 use crate::ui::result::{draw_result, NextStep, ResultView};
 use crate::ui::search::SearchState;
@@ -73,6 +74,12 @@ impl AppConfig {
     }
 }
 
+impl App {
+    fn t(&self) -> &'static UiStrings {
+        strings(self.cfg.user.ui.language)
+    }
+}
+
 /// Active repository session (present whenever Tree / Typing / Result / Splash is shown).
 struct RepoSession {
     repo: ResolvedRepository,
@@ -116,6 +123,7 @@ struct DisplaySettings {
     hide_skipped: bool,
     show_file_types_overlay: bool,
     hidden_paths: std::collections::HashSet<String>,
+    language: crate::config::UiLanguage,
 }
 
 pub struct App {
@@ -255,22 +263,23 @@ impl App {
             } else {
                 SPLASH_TOTAL_MS
             };
+            let t = strings(self.cfg.user.ui.language);
             {
                 let term = guard.terminal();
                 term.draw(|frame| {
                     let area = frame.area();
                     if self.showing_splash {
                         if let Some(s) = &self.session {
-                            draw_splash(frame, area, splash_elapsed, &s.repo.display_name);
+                            draw_splash(frame, area, splash_elapsed, &s.repo.display_name, t);
                         }
                     } else {
                         match self.place {
                             Place::Home => {
-                                draw_home(frame, area, &self.home, home_logo_elapsed);
+                                draw_home(frame, area, &self.home, home_logo_elapsed, t);
                             }
                             Place::Tree => {
                                 if let Some(s) = &self.session {
-                                    draw_tree(frame, area, &s.tree);
+                                    draw_tree(frame, area, &s.tree, t);
                                 }
                             }
                             Place::Typing => {
@@ -293,6 +302,7 @@ impl App {
                                         self.cfg.fx_enabled().then_some(&self.fx),
                                         self.cfg.user.typing.show_live_speed,
                                         step_label.as_deref(),
+                                        t,
                                     );
                                 }
                             }
@@ -300,37 +310,37 @@ impl App {
                                 if let Some(view) =
                                     self.session.as_ref().and_then(|s| s.result.as_ref())
                                 {
-                                    draw_result(frame, area, view);
+                                    draw_result(frame, area, view, t);
                                 }
                             }
                         }
                         match self.overlay {
                             Some(Overlay::Search) => {
-                                draw_search_modal(frame, area, &self.search);
+                                draw_search_modal(frame, area, &self.search, t);
                             }
                             Some(Overlay::Settings) => {
                                 draw_settings(frame, area, &self.settings, &self.cfg.user);
                             }
                             Some(Overlay::Stats) => {
                                 if let Some(stats) = &self.stats {
-                                    draw_stats(frame, area, stats);
+                                    draw_stats(frame, area, stats, t);
                                 }
                             }
-                            Some(Overlay::Pause) => draw_pause(frame, area),
+                            Some(Overlay::Pause) => draw_pause(frame, area, t),
                             Some(Overlay::FileTypes) => {
                                 if let Some(view) = &self.file_types {
-                                    draw_file_types(frame, area, view);
+                                    draw_file_types(frame, area, view, t);
                                 }
                             }
                             Some(Overlay::Flow) => {
                                 if let Some(view) = &self.flow_view {
-                                    draw_flow(frame, area, view);
+                                    draw_flow(frame, area, view, t);
                                 }
                             }
                             None => {}
                         }
                         if self.help {
-                            draw_help(frame, area, self.help_context());
+                            draw_help(frame, area, self.help_context(), t);
                         }
                     }
                 })
@@ -544,11 +554,11 @@ impl App {
             !session.import_edges.is_empty() && !candidates.is_empty() && typeable.len() > 1;
         let disabled_reason = if !flow_enabled {
             if session.import_edges.is_empty() {
-                Some("no import-analyzable language found".into())
+                Some(self.t().flow_no_language.to_string())
             } else if candidates.is_empty() {
-                Some("no entry point could be detected".into())
+                Some(self.t().flow_no_entry.to_string())
             } else {
-                Some("need more than one typeable file".into())
+                Some(self.t().flow_need_more_files.to_string())
             }
         } else {
             None
@@ -667,8 +677,9 @@ impl App {
                 // Revert the saved prefs so the overlay does not force itself
                 // open again next time, and keep the existing session intact.
                 let _ = self.store.save_file_type_prefs(repo_id, &old_prefs);
+                let prefix = strings(self.cfg.user.ui.language).file_types_not_applied;
                 if let Some(session) = &mut self.session {
-                    session.tree.message = Some(format!("file types not applied: {err}"));
+                    session.tree.message = Some(format!("{prefix}: {err}"));
                 }
             }
         }
@@ -899,6 +910,7 @@ impl App {
                         | SettingKind::FxPreset
                         | SettingKind::ProgressMode
                         | SettingKind::DependencyDirection
+                        | SettingKind::Language
                         | SettingKind::Bool
                 ) && self.settings.activate(&mut self.cfg.user, true)
                 {
@@ -915,6 +927,7 @@ impl App {
                         | SettingKind::FxPreset
                         | SettingKind::ProgressMode
                         | SettingKind::DependencyDirection
+                        | SettingKind::Language
                 ) {
                     if self.settings.activate(&mut self.cfg.user, false) {
                         self.persist_user_config()?;
@@ -1324,7 +1337,7 @@ impl App {
                 Ok(())
             }
             Err(err) => {
-                self.home.error = Some(err.to_string());
+                self.home.error = Some(self.t().format_error(&err));
                 self.place = Place::Home;
                 self.overlay = None;
                 Ok(())
@@ -1379,6 +1392,7 @@ impl App {
         let fx_intensity = self.cfg.user.fx.intensity;
         let fx_preset = self.cfg.user.fx.preset;
 
+        let lines_word = strings(self.cfg.user.ui.language).typing_lines;
         let Some(session) = &mut self.session else {
             return Err(Error::Message("no repository open".into()));
         };
@@ -1397,7 +1411,10 @@ impl App {
             .ok_or_else(|| Error::Message("file body missing database id".into()))?;
         let normalized = cp.chunk.normalized.clone();
         let checkpoint = cp.checkpoint.clone();
-        let label = format!("lines {}–{}", cp.chunk.start_line, cp.chunk.end_line);
+        let label = format!(
+            "{} {}–{}",
+            lines_word, cp.chunk.start_line, cp.chunk.end_line
+        );
         let syntax_colors = self
             .cfg
             .user
@@ -1690,6 +1707,7 @@ fn load_session(
                     hide_skipped: cfg.user.progress.hide_skipped,
                     show_file_types_overlay: false,
                     hidden_paths: std::collections::HashSet::new(),
+                    language: cfg.user.ui.language,
                 },
             ));
         }
@@ -1740,6 +1758,7 @@ fn load_session(
             hide_skipped: cfg.user.progress.hide_skipped,
             show_file_types_overlay,
             hidden_paths: hidden,
+            language: cfg.user.ui.language,
         },
     ))
 }
@@ -1783,8 +1802,7 @@ impl RepoSession {
             .cloned()
             .or_else(|| {
                 if saved_entry.is_some() {
-                    entry_message =
-                        Some("saved entry is no longer typeable; using detected entry".into());
+                    entry_message = Some(strings(display.language).flow_entry_fallback.to_string());
                 }
                 candidates.first().map(|candidate| candidate.path.clone())
             });

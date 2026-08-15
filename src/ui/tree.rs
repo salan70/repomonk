@@ -6,9 +6,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Gauge, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use crate::domain::content::{FileStatus, RepoProgress};
+use crate::domain::content::{FileStatus, ManualOverride, RepoProgress, SkipReason};
 use crate::domain::dependency::FlowOrder;
 use crate::domain::progress::directory_progress;
+use crate::ui::i18n::{display_width, UiStrings};
 use crate::ui::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,10 +30,10 @@ pub struct TreeRow {
     pub file_counts: Option<(usize, usize)>,
     /// File status; `None` for directories.
     pub status: Option<FileStatus>,
-    /// Human-readable skip reason for skipped files.
-    pub skip_reason: Option<String>,
-    /// Compact skip label shown in the row (`— test`).
-    pub skip_short: Option<String>,
+    /// Automatic skip reason for skipped files (persistence key, not display).
+    pub skip_reason: Option<SkipReason>,
+    /// True when the user skipped this file with `x`.
+    pub manual_skip: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -386,7 +387,7 @@ fn excluded_count(
         .count()
 }
 
-fn header_label(view: &TreeView) -> String {
+fn header_label(view: &TreeView, t: &UiStrings) -> String {
     let (completed, total) = view.overall;
     let ratio = if total == 0 {
         0.0
@@ -396,25 +397,31 @@ fn header_label(view: &TreeView) -> String {
     let pct = format!("{:.0}%", ratio * 100.0);
     if view.flow.is_some() {
         let (done, files) = view.flow_counts.unwrap_or(view.file_counts);
-        format!("{pct}  ·  {done}/{files} files in flow")
+        format!("{pct}  ·  {done}/{files} {}", t.files_in_flow)
     } else {
         let (done, files) = view.file_counts;
-        format!("{pct}  ·  {done}/{files} files")
+        format!("{pct}  ·  {done}/{files} {}", t.files)
     }
 }
 
-fn next_line(view: &TreeView) -> Line<'static> {
+fn next_line(view: &TreeView, t: &UiStrings) -> Line<'static> {
     match &view.recommend {
         Some(path) => {
             let text = if view.flow.is_some() {
                 if let Some(step) = view.flow_step_number(path) {
-                    format!(" ▸ Next  step {step} · {path} · Enter to start")
+                    format!(
+                        " ▸ {}  {} {step} · {path} · {}",
+                        t.next_label, t.next_step, t.enter_to_start
+                    )
                 } else {
-                    format!(" ▸ Next  {path} · Enter to start")
+                    format!(" ▸ {}  {path} · {}", t.next_label, t.enter_to_start)
                 }
             } else {
                 let lines = view.recommend_lines.unwrap_or(0);
-                format!(" ▸ Next  {path} · {lines} lines · Enter to start")
+                format!(
+                    " ▸ {}  {path} · {lines} {} · {}",
+                    t.next_label, t.lines, t.enter_to_start
+                )
             };
             Line::from(Span::styled(
                 text,
@@ -424,7 +431,7 @@ fn next_line(view: &TreeView) -> Line<'static> {
             ))
         }
         None if view.repo_complete => Line::from(Span::styled(
-            " ✓ repo complete".to_string(),
+            t.repo_complete.to_string(),
             Style::default().fg(theme::GREEN),
         )),
         None => Line::from(""),
@@ -493,20 +500,20 @@ fn flatten(
                         file_counts: Some((dprog.done_files, dprog.done_files + dprog.todo_files)),
                         status: None,
                         skip_reason: None,
-                        skip_short: None,
+                        manual_skip: false,
                     });
                     emitted_dirs.insert(acc.clone());
                 }
             } else {
                 let status = f.derive_status();
-                let (progress_counts, skip_reason, skip_short) = if status == FileStatus::Skipped {
+                let (progress_counts, skip_reason, manual_skip) = if status == FileStatus::Skipped {
                     (
                         None,
-                        f.display_skip_reason(),
-                        f.short_skip_reason().map(str::to_string),
+                        f.skip_reason.clone(),
+                        f.manual_override == Some(ManualOverride::Skip),
                     )
                 } else {
-                    (Some((f.completed_lines(), f.total_lines())), None, None)
+                    (Some((f.completed_lines(), f.total_lines())), None, false)
                 };
                 rows.push(TreeRow {
                     kind: TreeRowKind::File {
@@ -518,7 +525,7 @@ fn flatten(
                     file_counts: None,
                     status: Some(status),
                     skip_reason,
-                    skip_short,
+                    manual_skip,
                 });
             }
         }
@@ -663,7 +670,7 @@ pub fn list_height(area: Rect) -> usize {
     area.height.saturating_sub(4 + 2) as usize
 }
 
-pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
+pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView, t: &UiStrings) {
     theme::fill_background(frame, area);
     let block = theme::bordered_block(theme::title_line(&view.title));
     let inner = block.inner(area);
@@ -698,7 +705,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         .use_unicode(true)
         .gauge_style(Style::default().fg(theme::BLUE).bg(theme::CURRENT_LINE_BG))
         .label(Span::styled(
-            header_label(view),
+            header_label(view, t),
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
         ));
     let gauge_area = Rect {
@@ -708,15 +715,18 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         height: gauge_pane.height,
     };
     frame.render_widget(gauge, gauge_area);
-    frame.render_widget(Paragraph::new(next_line(view)), next_pane);
+    frame.render_widget(Paragraph::new(next_line(view, t)), next_pane);
 
-    frame.render_widget(Paragraph::new(info_line(view, info_pane.width)), info_pane);
+    frame.render_widget(
+        Paragraph::new(info_line(view, info_pane.width, t)),
+        info_pane,
+    );
 
     // Body: tree rows.
     let items: Vec<ListItem> = view
         .rows
         .iter()
-        .map(|row| ListItem::new(row_line(row, view, list_pane.width)))
+        .map(|row| ListItem::new(row_line(row, view, list_pane.width, t)))
         .collect();
 
     let mut state = ListState::default().with_offset(view.offset);
@@ -729,14 +739,14 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
     frame.render_stateful_widget(list, list_pane, &mut state);
 
     let hints = if view.filter_editing {
-        &[("Esc", "clear"), ("n/N", "next"), ("?", "more")][..]
+        [("Esc", t.clear), ("n/N", t.next), ("?", t.more)]
     } else {
-        &[("Enter", "open"), ("j/k", "move"), ("?", "more")][..]
+        [("Enter", t.open), ("j/k", t.move_), ("?", t.more)]
     };
-    frame.render_widget(Paragraph::new(theme::key_hints(hints)), footer_pane);
+    frame.render_widget(Paragraph::new(theme::key_hints(&hints)), footer_pane);
 }
 
-fn info_line(view: &TreeView, width: u16) -> Line<'static> {
+fn info_line(view: &TreeView, width: u16, t: &UiStrings) -> Line<'static> {
     if view.filter_editing || !view.filter.is_empty() {
         return Line::from(vec![
             Span::styled(" /", Style::default().fg(theme::CYAN)),
@@ -756,15 +766,15 @@ fn info_line(view: &TreeView, width: u16) -> Line<'static> {
             Style::default().fg(theme::MUTED),
         ));
     }
-    let left = selected_detail(view);
+    let left = selected_detail(view, t);
     let right = if view.excluded == 0 {
         String::new()
     } else if view.hide_skipped {
-        format!("{} excluded · .", view.excluded)
+        format!("{} {} · .", view.excluded, t.excluded)
     } else {
-        format!("{} excluded shown · .", view.excluded)
+        format!("{} {} · .", view.excluded, t.excluded_shown)
     };
-    let pad = (width as usize).saturating_sub(left.chars().count() + right.chars().count() + 2);
+    let pad = (width as usize).saturating_sub(display_width(&left) + display_width(&right) + 2);
     Line::from(vec![
         Span::styled(format!(" {left}"), Style::default().fg(theme::MUTED)),
         Span::raw(" ".repeat(pad)),
@@ -772,20 +782,23 @@ fn info_line(view: &TreeView, width: u16) -> Line<'static> {
     ])
 }
 
-fn selected_detail(view: &TreeView) -> String {
+fn selected_detail(view: &TreeView, t: &UiStrings) -> String {
     let Some(row) = view.rows.get(view.selected) else {
         return String::new();
     };
     match &row.kind {
         TreeRowKind::File { path } => {
-            let mut text = if let Some(reason) = &row.skip_reason {
-                format!("{path} · {reason}")
+            let mut text = if row.manual_skip || row.skip_reason.is_some() {
+                format!(
+                    "{path} · {}",
+                    t.skip_full_opt(row.skip_reason.as_ref(), row.manual_skip)
+                )
             } else if let Some((done, total)) = row.progress {
-                format!("{path} · {total} lines · {done} done")
+                format!("{path} · {total} {} · {done} {}", t.lines, t.done)
             } else {
                 path.clone()
             };
-            if let Some(origin) = selected_origin(view) {
+            if let Some(origin) = selected_origin(view, t) {
                 text.push_str(" · ");
                 text.push_str(&origin);
             }
@@ -793,9 +806,11 @@ fn selected_detail(view: &TreeView) -> String {
         }
         TreeRowKind::Dir { path } => {
             let (done, total) = row.file_counts.unwrap_or((0, 0));
-            let mut text = format!("{path}/ · {total} files · {done} done");
+            let mut text = format!("{path}/ · {total} {} · {done} {}", t.files, t.done);
             if let Some(flow) = &view.flow {
-                text.push_str(" · entry ");
+                text.push_str(" · ");
+                text.push_str(t.entry);
+                text.push(' ');
                 text.push_str(&flow.entry);
             }
             text
@@ -816,22 +831,22 @@ fn mini_bar(ratio: f64, width: usize) -> String {
     s
 }
 
-fn selected_origin(view: &TreeView) -> Option<String> {
+fn selected_origin(view: &TreeView, t: &UiStrings) -> Option<String> {
     let flow = view.flow.as_ref()?;
     let path = view.selected_file_path()?;
     if path == flow.entry {
-        return Some("entry point".into());
+        return Some(t.entry_point.to_string());
     }
     if let Some(via) = flow.via(&path) {
         return Some(format!("← {}:{}  {}", via.importer, via.line, via.raw));
     }
     match flow.is_reachable(&path) {
-        Some(true) => Some("entry point".into()),
-        Some(false) | None => Some("outside flow (unreachable from entry)".into()),
+        Some(true) => Some(t.entry_point.to_string()),
+        Some(false) | None => Some(t.outside_flow.to_string()),
     }
 }
 
-fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
+fn row_line(row: &TreeRow, view: &TreeView, width: u16, t: &UiStrings) -> Line<'static> {
     let mut spans: Vec<Span> = Vec::new();
     let indent = 1 + row.depth * 2;
     spans.push(Span::raw(" ".repeat(indent)));
@@ -907,7 +922,8 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
                 row.name.clone(),
                 Style::default().fg(name_color),
             ));
-            if let Some(short) = &row.skip_short {
+            if row.manual_skip || row.skip_reason.is_some() {
+                let short = t.skip_short(row.skip_reason.as_ref(), row.manual_skip);
                 spans.push(Span::styled(
                     format!(" — {short}"),
                     Style::default()
@@ -923,9 +939,15 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UiLanguage;
     use crate::domain::content::{
         Chunk, ChunkCompletion, ChunkProgress, FileProgress, FileStatus, RepoProgress, SkipReason,
     };
+    use crate::ui::i18n::strings;
+
+    fn en() -> &'static crate::ui::i18n::UiStrings {
+        strings(UiLanguage::En)
+    }
 
     fn file(path: &str, body: &str) -> FileProgress {
         FileProgress {
@@ -1135,7 +1157,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| draw_tree(frame, frame.area(), view))
+            .draw(|frame| draw_tree(frame, frame.area(), view, en()))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let selected = view.rows.get(view.selected)?;
@@ -1240,7 +1262,7 @@ mod tests {
             .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
         let mut tree = tree_view(&progress, true);
 
-        let hidden: String = info_line(&tree, 100)
+        let hidden: String = info_line(&tree, 100, en())
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -1248,7 +1270,7 @@ mod tests {
         assert!(hidden.contains("1 excluded · ."), "{hidden}");
 
         tree.toggle_hide_skipped(&progress);
-        let shown: String = info_line(&tree, 100)
+        let shown: String = info_line(&tree, 100, en())
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -1382,7 +1404,7 @@ mod tests {
             files: vec![file("src/a.rs", "a\nb\nc"), file("lib.rs", "l")],
         };
         let tree = tree_view(&progress, false);
-        let label = header_label(&tree);
+        let label = header_label(&tree, en());
         assert!(
             label.contains("0/2 files"),
             "expected file counts in {label}"
@@ -1400,9 +1422,9 @@ mod tests {
     fn detail_row_summarizes_selected_file_and_dir() {
         let progress = progress();
         let mut tree = tree_view(&progress, false);
-        assert_eq!(selected_detail(&tree), "src/a.rs · 1 lines · 0 done");
+        assert_eq!(selected_detail(&tree, en()), "src/a.rs · 1 lines · 0 done");
         tree.move_by(-1);
-        assert_eq!(selected_detail(&tree), "src/ · 2 files · 0 done");
+        assert_eq!(selected_detail(&tree, en()), "src/ · 2 files · 0 done");
     }
 
     #[test]
@@ -1419,10 +1441,7 @@ mod tests {
             .iter()
             .find(|r| r.name == "foo.rs")
             .expect("skipped row");
-        assert_eq!(skipped.skip_short.as_deref(), Some("test"));
-        assert_eq!(
-            skipped.skip_reason.as_deref(),
-            Some("test file (include_tests=false)")
-        );
+        assert!(!skipped.manual_skip);
+        assert_eq!(skipped.skip_reason.as_ref(), Some(&SkipReason::TestFile));
     }
 }

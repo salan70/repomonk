@@ -4,6 +4,7 @@ pub mod fx;
 pub mod help;
 pub mod highlight;
 pub mod home;
+pub mod i18n;
 pub mod pause;
 pub mod result;
 pub mod search;

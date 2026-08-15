@@ -9,6 +9,7 @@ use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::config::UserConfig;
+use crate::ui::i18n::{strings, UiStrings};
 use crate::ui::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,12 +20,14 @@ pub enum SettingKind {
     DependencyDirection,
     FxIntensity,
     FxPreset,
+    Language,
     /// Display-only / locked (cannot change).
     Locked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingId {
+    Language,
     IncludeImports,
     IncludeDocComments,
     IncludeComments,
@@ -58,6 +61,14 @@ struct SettingDef {
 }
 
 const SETTINGS: &[SettingDef] = &[
+    SettingDef {
+        id: SettingId::Language,
+        section: "ui",
+        label: "language",
+        kind: SettingKind::Language,
+        unsupported: false,
+        live: true,
+    },
     SettingDef {
         id: SettingId::IncludeImports,
         section: "content",
@@ -236,11 +247,14 @@ impl SettingsView {
     pub fn activate(&mut self, cfg: &mut UserConfig, forward: bool) -> bool {
         let def = SETTINGS[self.selected];
         if def.kind == SettingKind::Locked {
-            self.status = Some("auto_close_brackets is not implemented yet".into());
+            self.status = Some(strings(cfg.ui.language).settings_auto_close.into());
             return false;
         }
         self.status = None;
         match def.id {
+            SettingId::Language => {
+                cfg.ui.language = cfg.ui.language.cycle();
+            }
             SettingId::IncludeImports => {
                 cfg.content.include_imports = !cfg.content.include_imports;
             }
@@ -331,6 +345,7 @@ impl Default for SettingsView {
 
 fn value_string(cfg: &UserConfig, id: SettingId) -> String {
     match id {
+        SettingId::Language => cfg.ui.language.as_str().into(),
         SettingId::IncludeImports => cfg.content.include_imports.to_string(),
         SettingId::IncludeDocComments => cfg.content.include_doc_comments.to_string(),
         SettingId::IncludeComments => cfg.content.include_comments.to_string(),
@@ -366,10 +381,35 @@ fn dialog_rect(area: Rect) -> Rect {
     theme::centered_rect(area, width, height)
 }
 
+fn setting_desc(t: &UiStrings, id: SettingId) -> &'static str {
+    match id {
+        SettingId::Language => t.setting_language,
+        SettingId::IncludeImports => t.setting_include_imports,
+        SettingId::IncludeDocComments => t.setting_include_doc_comments,
+        SettingId::IncludeComments => t.setting_include_comments,
+        SettingId::IncludeTests => t.setting_include_tests,
+        SettingId::IncludeConfigs => t.setting_include_configs,
+        SettingId::TabWidth => t.setting_tab_width,
+        SettingId::AutoIndent => t.setting_auto_indent,
+        SettingId::AutoCloseBrackets => t.setting_auto_close_brackets,
+        SettingId::AllowBackspace => t.setting_allow_backspace,
+        SettingId::ShowLiveSpeed => t.setting_show_live_speed,
+        SettingId::SyntaxHighlight => t.setting_syntax_highlight,
+        SettingId::ProgressMode => t.setting_mode,
+        SettingId::DependencyDirection => t.setting_dependency_direction,
+        SettingId::KeepDoneOnRefresh => t.setting_keep_done_on_refresh,
+        SettingId::HideSkipped => t.setting_hide_skipped,
+        SettingId::FxEnabled => t.setting_fx_enabled,
+        SettingId::FxIntensity => t.setting_fx_intensity,
+        SettingId::FxPreset => t.setting_fx_preset,
+    }
+}
+
 pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &UserConfig) {
+    let t = strings(cfg.ui.language);
     let card = dialog_rect(area);
     frame.render_widget(Clear, card);
-    let block = theme::bordered_block(theme::title_line("Settings"));
+    let block = theme::bordered_block(theme::title_line(t.title_settings));
     let inner = block.inner(card);
     frame.render_widget(block, card);
 
@@ -404,14 +444,22 @@ pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &U
             last_section = def.section;
         }
         let value = value_string(cfg, def.id);
-        let mut label = format!("    {:<24} {}", def.label, value);
+        let desc = setting_desc(t, def.id);
+        let mut label = if desc.is_empty() {
+            format!("    {:<24} {}", def.label, value)
+        } else {
+            format!("    {:<24} {:<8} {desc}", def.label, value)
+        };
         if def.unsupported {
-            label.push_str("  (unsupported)");
+            label.push_str("  ");
+            label.push_str(t.settings_unsupported);
         }
         if def.kind == SettingKind::Locked {
-            label.push_str("  [locked]");
+            label.push_str("  ");
+            label.push_str(t.settings_locked);
         } else if !def.live {
-            label.push_str("  (next open)");
+            label.push_str("  ");
+            label.push_str(t.settings_next_open);
         }
         items.push(ListItem::new(Line::from(Span::styled(
             label,
@@ -450,10 +498,7 @@ pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &U
     state.select(Some(list_index));
     frame.render_stateful_widget(list, panes[1], &mut state);
 
-    let status = view
-        .status
-        .as_deref()
-        .unwrap_or("Changes apply on next open / typing session. Content filters need re-open.");
+    let status = view.status.as_deref().unwrap_or(t.settings_hint);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!("  {status}"),
@@ -464,11 +509,11 @@ pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &U
 
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("Enter/Space", "toggle"),
-            ("j/k", "move"),
-            ("h/l", "adjust"),
-            ("Esc", "close"),
-            ("?", "help"),
+            ("Enter/Space", t.toggle),
+            ("j/k", t.move_),
+            ("h/l", t.adjust),
+            ("Esc", t.close),
+            ("?", t.help),
         ])),
         panes[3],
     );
@@ -514,5 +559,21 @@ mod tests {
         assert!(!cfg.typing.syntax_highlight);
         assert!(view.activate(&mut cfg, true));
         assert!(cfg.typing.syntax_highlight);
+    }
+
+    #[test]
+    fn language_setting_cycles_and_is_live() {
+        let mut view = SettingsView::new();
+        view.selected = SETTINGS
+            .iter()
+            .position(|def| def.id == SettingId::Language)
+            .expect("language setting");
+        let mut cfg = UserConfig::default();
+        assert_eq!(cfg.ui.language, crate::config::UiLanguage::Ja);
+        assert!(SETTINGS[view.selected].live);
+        assert!(view.activate(&mut cfg, true));
+        assert_eq!(cfg.ui.language, crate::config::UiLanguage::En);
+        assert!(view.activate(&mut cfg, true));
+        assert_eq!(cfg.ui.language, crate::config::UiLanguage::Ja);
     }
 }

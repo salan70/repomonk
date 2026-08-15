@@ -9,6 +9,7 @@ use ratatui::Frame;
 use crate::config::FxPreset;
 use crate::domain::typing::TypingSnapshot;
 use crate::ui::fx::FxState;
+use crate::ui::i18n::UiStrings;
 use crate::ui::theme;
 
 /// Cursor glow color per no-miss streak tier (0..=3).
@@ -33,6 +34,7 @@ pub fn draw_typing(
     fx: Option<&FxState>,
     show_live_speed: bool,
     step_label: Option<&str>,
+    t: &UiStrings,
 ) {
     theme::fill_background(frame, area);
 
@@ -99,6 +101,7 @@ pub fn draw_typing(
             total_lines,
             fx,
             show_live_speed,
+            t,
         )),
         panes[2],
     );
@@ -110,17 +113,18 @@ fn status_line(
     total_lines: usize,
     fx: Option<&FxState>,
     show_live_speed: bool,
+    t: &UiStrings,
 ) -> Line<'static> {
     let sep = || Span::styled("  │  ", Style::default().fg(theme::BORDER));
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(
-            format!("line {current_line}/{total_lines}"),
+            format!("{} {current_line}/{total_lines}", t.typing_line),
             Style::default().fg(theme::BLUE),
         ),
         sep(),
         Span::styled(
-            format!("misses {}", snap.misses),
+            format!("{} {}", t.typing_misses, snap.misses),
             Style::default().fg(if snap.misses > 0 {
                 theme::RED
             } else {
@@ -153,7 +157,10 @@ fn status_line(
         spans.push(Span::styled(format!("⚡{}", fx.streak()), style));
     }
     spans.push(sep());
-    spans.push(Span::styled("Esc pause", Style::default().fg(theme::MUTED)));
+    spans.push(Span::styled(
+        t.typing_esc_pause,
+        Style::default().fg(theme::MUTED),
+    ));
     Line::from(spans)
 }
 

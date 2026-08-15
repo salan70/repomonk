@@ -10,6 +10,7 @@ use ratatui::Frame;
 
 use crate::config::ProgressMode;
 use crate::domain::entry::EntryCandidate;
+use crate::ui::i18n::UiStrings;
 use crate::ui::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,10 +131,10 @@ fn dialog_rect(area: Rect, row_count: usize) -> Rect {
     theme::centered_rect(area, width, height)
 }
 
-pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView) {
+pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView, t: &UiStrings) {
     let card = dialog_rect(area, view.rows.len());
     frame.render_widget(Clear, card);
-    let title = format!("How to proceed — {}", view.repo_label);
+    let title = format!("{} — {}", t.title_flow, view.repo_label);
     let block = theme::bordered_block(theme::title_line(&title));
     let inner = block.inner(card);
     frame.render_widget(block, card);
@@ -156,11 +157,11 @@ pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView) {
                 items.push(ListItem::new(Line::from("")));
             }
             let heading = match kind {
-                "mode" => "  mode",
-                _ => "  entry point",
+                "mode" => t.flow_mode,
+                _ => t.flow_entry,
             };
             items.push(ListItem::new(Line::from(Span::styled(
-                heading,
+                format!("  {heading}"),
                 Style::default()
                     .fg(theme::BLUE)
                     .add_modifier(Modifier::BOLD),
@@ -177,13 +178,8 @@ pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView) {
                 } else {
                     "○"
                 };
-                let extra = format!("{:>5} files", view.file_count);
-                (
-                    bullet,
-                    "flow    follow call flow".to_string(),
-                    extra,
-                    view.flow_enabled,
-                )
+                let extra = format!("{:>5} {}", view.file_count, t.files);
+                (bullet, t.flow_follow.to_string(), extra, view.flow_enabled)
             }
             FlowRow::ModeManual => {
                 let bullet = if view.mode == ProgressMode::Manual {
@@ -191,12 +187,7 @@ pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView) {
                 } else {
                     "○"
                 };
-                (
-                    bullet,
-                    "manual  pick from the tree".to_string(),
-                    String::new(),
-                    true,
-                )
+                (bullet, t.flow_manual.to_string(), String::new(), true)
             }
             FlowRow::Entry { path, reason } => {
                 let bullet = if view.entry.as_deref() == Some(path.as_str()) {
@@ -204,7 +195,12 @@ pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView) {
                 } else {
                     "○"
                 };
-                (bullet, format!("{path:<20}  {reason}"), String::new(), true)
+                (
+                    bullet,
+                    format!("{path:<20}  {}", t.entry_reason(reason)),
+                    String::new(),
+                    true,
+                )
             }
         };
         let color = if !enabled || (matches!(row, FlowRow::Entry { .. }) && entries_dim) {
@@ -247,9 +243,9 @@ pub fn draw_flow(frame: &mut Frame, area: Rect, view: &FlowView) {
 
     frame.render_widget(
         Paragraph::new(theme::key_hints(&[
-            ("j/k", "move"),
-            ("Enter/Space", "select"),
-            ("Esc/q", "apply & close"),
+            ("j/k", t.move_),
+            ("Enter/Space", t.select),
+            ("Esc/q", t.apply_close),
         ])),
         panes[1],
     );

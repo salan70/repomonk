@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::domain::content::TypingMetrics;
 use crate::domain::dependency::FlowVia;
+use crate::ui::i18n::UiStrings;
 use crate::ui::theme;
 
 #[derive(Debug, Clone)]
@@ -28,7 +29,7 @@ pub struct ResultView {
     pub next: Option<NextStep>,
 }
 
-pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
+pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView, t: &UiStrings) {
     theme::fill_background(frame, area);
 
     let card_width = (view.path.chars().count() as u16 + 8).clamp(46, area.width);
@@ -44,9 +45,9 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
     frame.render_widget(block, card);
 
     let (headline, color) = if view.file_done {
-        ("✓ File complete", theme::GREEN)
+        (t.file_complete, theme::GREEN)
     } else {
-        ("✓ Session complete", theme::GREEN)
+        (t.session_complete, theme::GREEN)
     };
 
     let m = &view.metrics;
@@ -76,18 +77,21 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
         ))
         .alignment(Alignment::Center),
         Line::from(""),
-        metric("accuracy", format!("{:.1}%", m.accuracy)),
+        metric(t.accuracy, format!("{:.1}%", m.accuracy)),
         metric("KPM", format!("{:.0}", m.kpm)),
         metric("WPM", format!("{:.0}", m.wpm)),
-        metric("keystrokes", format!("{}", m.keystrokes)),
-        metric("misses", format!("{}", m.misses)),
-        metric("time", format!("{:.1}s", m.elapsed_ms as f64 / 1000.0)),
+        metric(t.keystrokes, format!("{}", m.keystrokes)),
+        metric(t.misses, format!("{}", m.misses)),
+        metric(t.time, format!("{:.1}s", m.elapsed_ms as f64 / 1000.0)),
         Line::from(""),
     ];
     if let Some(next) = &view.next {
         lines.push(
             Line::from(Span::styled(
-                format!("── next  {}/{} ──────────────", next.index, next.total),
+                format!(
+                    "── {}  {}/{} ──────────────",
+                    t.next_section, next.index, next.total
+                ),
                 Style::default().fg(theme::MUTED),
             ))
             .alignment(Alignment::Center),
@@ -112,10 +116,10 @@ pub fn draw_result(frame: &mut Frame, area: Rect, view: &ResultView) {
     }
     lines.push(
         theme::key_hints(&[
-            ("Enter", "next"),
-            ("r", "retry"),
-            ("Esc", "back"),
-            ("?", "help"),
+            ("Enter", t.next),
+            ("r", t.retry),
+            ("Esc", t.back),
+            ("?", t.help),
         ])
         .alignment(Alignment::Center),
     );
