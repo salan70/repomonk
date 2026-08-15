@@ -1,4 +1,6 @@
 //! Help overlay: current-place keys, common keys, and tree legend.
+//!
+//! Rendered as a floating dialog over the current place, the same way File types floats.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -23,7 +25,6 @@ pub enum HelpContext {
 }
 
 pub fn draw_help(frame: &mut Frame, area: Rect, ctx: HelpContext) {
-    theme::fill_background(frame, area);
     let card_height = match ctx {
         HelpContext::Tree => 32,
         HelpContext::Home => 26,

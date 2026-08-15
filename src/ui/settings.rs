@@ -1,9 +1,11 @@
-//! Settings screen (home `c`): edit `config.toml` keys.
+//! Settings overlay (`,` / home `c`): edit `config.toml` keys.
+//!
+//! Rendered as a floating dialog over the current place, the same way File types floats.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::config::UserConfig;
@@ -350,11 +352,26 @@ fn value_string(cfg: &UserConfig, id: SettingId) -> String {
     }
 }
 
+fn dialog_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(8).min(72);
+    let mut headers = 0u16;
+    let mut last = "";
+    for def in SETTINGS {
+        if def.section != last {
+            headers += 1;
+            last = def.section;
+        }
+    }
+    let height = (SETTINGS.len() as u16 + headers + 6).clamp(12, area.height.saturating_sub(2));
+    theme::centered_rect(area, width, height)
+}
+
 pub fn draw_settings(frame: &mut Frame, area: Rect, view: &SettingsView, cfg: &UserConfig) {
-    theme::fill_background(frame, area);
+    let card = dialog_rect(area);
+    frame.render_widget(Clear, card);
     let block = theme::bordered_block(theme::title_line("Settings"));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = block.inner(card);
+    frame.render_widget(block, card);
 
     let panes = Layout::default()
         .direction(Direction::Vertical)

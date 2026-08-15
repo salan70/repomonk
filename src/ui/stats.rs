@@ -1,9 +1,11 @@
-//! Achievement-only stats screen (home `g`).
+//! Achievement-only stats overlay (`S` / home `g`).
+//!
+//! Rendered as a floating dialog over the current place, the same way File types floats.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::store::{GlobalSummary, RecentRepo};
@@ -42,11 +44,18 @@ impl StatsView {
     }
 }
 
+fn dialog_rect(area: Rect, repo_count: usize) -> Rect {
+    let width = area.width.saturating_sub(8).min(72);
+    let height = (repo_count.max(1) as u16 + 10).clamp(12, area.height.saturating_sub(2));
+    theme::centered_rect(area, width, height)
+}
+
 pub fn draw_stats(frame: &mut Frame, area: Rect, view: &StatsView) {
-    theme::fill_background(frame, area);
+    let card = dialog_rect(area, view.repos.len());
+    frame.render_widget(Clear, card);
     let block = theme::bordered_block(theme::title_line("Stats"));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = block.inner(card);
+    frame.render_widget(block, card);
 
     let panes = Layout::default()
         .direction(Direction::Vertical)

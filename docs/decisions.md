@@ -673,3 +673,27 @@ Tree に状態・理由・行数・おすすめ・flow bar・長いフッタが�
 - D-025 の「既存 Tree に flow bar・由来・`▸ next` を重ねる」のうち独立 flow bar と
   行内 `▸ next` は廃止し、ヘッダ / 詳細 / Next 行へ畳む。
 
+## D-027: Settings / Stats / Help はフローティングダイアログにする
+
+- 状態: 採用
+- 日付: 2026-08-15
+- 置換: D-015 の「全画面 Settings」、D-024 の「Settings/Stats は全画面上書き」
+
+### 決定
+
+Settings（`,`）、Stats（`S`）、Help（`?`）は、File types / Flow / Pause / Search
+と同じく、現在の場所を背景に残した中央ダイアログとして描画する。画面全体を
+塗りつぶして上書きしない。
+
+### 理由
+
+File types と Settings だけ表示スタイルが違うと、同じ Overlay 層なのに開いた
+ときの空間の扱いがばらつく。背景の場所が見えたままカードが乗る形に揃える。
+
+### 影響
+
+- `docs/product-requirements.md` §9.3 の Settings / Stats / Help / File types を更新する。
+- D-015 の「Homeの`c`で全画面Settingsを開き」と、D-024 の
+  「Settings/Statsのように全画面を上書きする表示にはしない」は表示スタイルに
+  限ってこの決定が優先する。キーと保存の挙動は変えない。
+
