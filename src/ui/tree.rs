@@ -41,7 +41,9 @@ pub struct TreeView {
     pub selected: usize,
     pub recommend: Option<String>,
     pub title: String,
-    pub collapsed: std::collections::HashSet<String>,
+    /// Directories the user has opened. Anything absent is closed, so a directory
+    /// that only appears once excluded files are shown starts closed like the rest.
+    pub opened: std::collections::HashSet<String>,
     /// Flow traversal order, when flow mode is active.
     pub flow: Option<FlowOrder>,
     /// Reachable `(done, total)` file counts for the flow bar.
@@ -92,28 +94,22 @@ impl TreeView {
             .as_ref()
             .map(|order| (order.reachable_done(progress), order.reachable_total()));
         let root = directory_progress(progress, "");
-        let expanded = compress_chains(flatten(progress, hide_skipped, &hidden_paths));
-        let mut collapsed: std::collections::HashSet<String> = expanded
-            .iter()
-            .filter_map(|row| match &row.kind {
-                TreeRowKind::Dir { path } => Some(path.clone()),
-                TreeRowKind::File { .. } => None,
-            })
-            .collect();
+        let all_rows = compress_chains(flatten(progress, hide_skipped, &hidden_paths));
+        let mut opened = std::collections::HashSet::new();
         if let Some(path) = &recommend {
             let mut current = path.clone();
             while let Some(parent) = parent_path(&current) {
-                collapsed.remove(&parent);
+                opened.insert(parent.clone());
                 current = parent;
             }
         }
-        let rows = apply_collapse(expanded, &collapsed);
+        let rows = apply_collapse(all_rows, &opened);
         let mut view = Self {
             rows,
             selected: 0,
             recommend,
             title: repo_name.to_string(),
-            collapsed,
+            opened,
             flow,
             flow_counts,
             overall: (root.completed_lines, root.total_lines),
@@ -164,7 +160,7 @@ impl TreeView {
         let screen_row = prev_selected.saturating_sub(self.offset);
         self.rows = visible_rows(
             progress,
-            &self.collapsed,
+            &self.opened,
             self.hide_skipped,
             &self.hidden_paths,
             &self.filter,
@@ -182,10 +178,13 @@ impl TreeView {
         self.clamp_offset();
     }
 
-    /// Keep `offset` in range and the cursor inside the drawn window.
+    /// Scroll only as far as it takes to keep the cursor inside the drawn window.
+    ///
+    /// The offset is deliberately not capped at `rows.len() - height`: revealing
+    /// excluded files must not push the cursor down the screen just because the
+    /// shorter list happened to fit. Trailing blank lines are the lesser evil.
     fn clamp_offset(&mut self) {
         let height = self.visible_rows.max(1);
-        self.offset = self.offset.min(self.rows.len().saturating_sub(height));
         if self.selected < self.offset {
             self.offset = self.selected;
         } else if self.selected >= self.offset + height {
@@ -320,7 +319,7 @@ impl TreeView {
 
     pub fn expand_dir(&mut self, progress: &RepoProgress) {
         if let Some(path) = self.selected_dir_path() {
-            if self.collapsed.remove(&path) {
+            if self.opened.insert(path) {
                 self.refresh_rows(progress);
             }
         }
@@ -329,7 +328,7 @@ impl TreeView {
     pub fn collapse_or_parent(&mut self, progress: &RepoProgress) {
         match self.rows.get(self.selected).map(|r| r.kind.clone()) {
             Some(TreeRowKind::Dir { path }) => {
-                if self.collapsed.insert(path.clone()) {
+                if self.opened.remove(&path) {
                     self.refresh_rows(progress);
                 } else if let Some(parent) = parent_path(&path) {
                     self.jump_dir(&parent);
@@ -366,8 +365,8 @@ impl TreeView {
         }) = self.rows.get(self.selected)
         {
             let path = path.clone();
-            if !self.collapsed.remove(&path) {
-                self.collapsed.insert(path);
+            if !self.opened.remove(&path) {
+                self.opened.insert(path);
             }
             self.refresh_rows(progress);
         }
@@ -451,14 +450,14 @@ fn parent_path(path: &str) -> Option<String> {
 
 fn visible_rows(
     progress: &RepoProgress,
-    collapsed: &std::collections::HashSet<String>,
+    opened: &std::collections::HashSet<String>,
     hide_skipped: bool,
     hidden_paths: &std::collections::HashSet<String>,
     filter: &str,
 ) -> Vec<TreeRow> {
     let rows = flatten(progress, hide_skipped, hidden_paths);
     let rows = compress_chains(rows);
-    let rows = apply_collapse(rows, collapsed);
+    let rows = apply_collapse(rows, opened);
     filter_rows(rows, filter)
 }
 
@@ -577,10 +576,7 @@ fn compress_once(rows: &[TreeRow]) -> Vec<TreeRow> {
     out
 }
 
-fn apply_collapse(
-    rows: Vec<TreeRow>,
-    collapsed: &std::collections::HashSet<String>,
-) -> Vec<TreeRow> {
+fn apply_collapse(rows: Vec<TreeRow>, opened: &std::collections::HashSet<String>) -> Vec<TreeRow> {
     let mut out = Vec::new();
     let mut hidden_until_depth: Option<usize> = None;
     for row in rows {
@@ -591,7 +587,7 @@ fn apply_collapse(
             hidden_until_depth = None;
         }
         if let TreeRowKind::Dir { path } = &row.kind {
-            if collapsed.contains(path) {
+            if !opened.contains(path) {
                 hidden_until_depth = Some(row.depth);
             }
         }
@@ -842,10 +838,10 @@ fn row_line(row: &TreeRow, view: &TreeView, width: u16) -> Line<'static> {
 
     match &row.kind {
         TreeRowKind::Dir { path } => {
-            let arrow = if view.collapsed.contains(path) {
-                "▸ "
-            } else {
+            let arrow = if view.opened.contains(path) {
                 "▾ "
+            } else {
+                "▸ "
             };
             spans.push(Span::styled(
                 arrow.to_string(),
@@ -1067,8 +1063,15 @@ mod tests {
         assert!(!tree.hide_skipped);
         let shown: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
         assert!(shown.contains(&"tests"));
-        assert!(shown.contains(&"foo.rs"));
+        // `tests/` appears for the first time here, so it comes in closed like every
+        // other directory does at open, rather than dumping its contents on screen.
+        assert!(!shown.contains(&"foo.rs"));
+        tree.opened.insert("tests".into());
+        tree.refresh_rows(&progress);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"foo.rs"));
 
+        tree.opened.remove("tests");
         tree.toggle_hide_skipped(&progress);
         assert!(tree.hide_skipped);
         let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
@@ -1145,6 +1148,41 @@ mod tests {
     }
 
     #[test]
+    fn revealing_does_not_push_the_cursor_down_when_the_hidden_list_fit() {
+        // Hidden, this tree is short enough to fit with room to spare; shown, it is
+        // far taller. The cursor must hold its line rather than be pushed down by
+        // the rows inserted above it.
+        let mut files: Vec<FileProgress> = (0..5)
+            .map(|i| file(&format!("src/a{i:02}.rs"), "a"))
+            .collect();
+        files.extend(
+            (0..30).map(|i| skipped_file(&format!("src/z{i:02}.rs"), SkipReason::TestFile)),
+        );
+        files.extend((0..5).map(|i| file(&format!("src/b{i:02}.rs"), "b")));
+        let progress = RepoProgress { files };
+
+        let mut tree = tree_view(&progress, true);
+        tree.set_visible_rows(20);
+        assert!(
+            tree.rows.len() < tree.visible_rows,
+            "hidden list should fit"
+        );
+        assert!(tree.jump_to_path("src/b02.rs"));
+        let screen_line = tree.selected - tree.offset;
+
+        tree.toggle_hide_skipped(&progress);
+        assert!(
+            tree.rows.len() > tree.visible_rows,
+            "shown list should overflow"
+        );
+        assert_eq!(tree.selected_path().as_deref(), Some("src/b02.rs"));
+        assert_eq!(tree.selected - tree.offset, screen_line);
+
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.selected - tree.offset, screen_line);
+    }
+
+    #[test]
     fn opening_does_not_pin_the_cursor_to_the_top() {
         let progress = progress_with_excluded_above();
         let (width, height) = (60, 20);
@@ -1185,7 +1223,7 @@ mod tests {
             .files
             .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
         let mut tree = tree_view(&progress, false);
-        tree.collapsed.clear();
+        tree.opened.insert("tests".into());
         tree.refresh_rows(&progress);
         assert!(tree.jump_to_path("tests/foo.rs"));
 
@@ -1252,8 +1290,8 @@ mod tests {
         assert!(names.contains(&"b.rs"));
         assert!(names.contains(&"other"));
         assert!(!names.contains(&"x.rs"));
-        assert!(tree.collapsed.contains("other"));
-        assert!(!tree.collapsed.contains("src"));
+        assert!(!tree.opened.contains("other"));
+        assert!(tree.opened.contains("src"));
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
     }
 
@@ -1316,7 +1354,7 @@ mod tests {
             .expect("compressed src/a/b row");
         tree.selected = idx;
         tree.collapse_or_parent(&progress);
-        assert!(tree.collapsed.contains("src/a/b"));
+        assert!(!tree.opened.contains("src/a/b"));
         assert_eq!(tree.selected_dir_path().as_deref(), Some("src/a/b"));
         tree.collapse_or_parent(&progress);
         assert_eq!(tree.selected_dir_path().as_deref(), Some("src"));
@@ -1374,7 +1412,7 @@ mod tests {
             .files
             .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
         let mut tree = tree_view(&progress, false);
-        tree.collapsed.remove("tests");
+        tree.opened.insert("tests".into());
         tree.refresh_rows(&progress);
         let skipped = tree
             .rows
