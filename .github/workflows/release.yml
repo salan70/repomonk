@@ -1,0 +1,195 @@
+name: Release
+
+# `vX.Y.Z` タグの push でのみリリースする。
+# workflow_dispatch はタグを打つ前の動作確認用で、tag を空にすると
+# ビルドまで走らせて Release を作らない（dry run）。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '検証したいタグ名（例: v0.1.0）。空ならビルドのみで公開しない'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # main へ branch protection をかけない代わりに、外へ出る経路にだけ品質ゲートを置く。
+  verify:
+    name: verify
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag and check version
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            publish=true
+          else
+            tag="$INPUT_TAG"
+            publish=false
+          fi
+
+          if [ -z "$tag" ]; then
+            echo "タグ未指定のため dry run で続行します。"
+            echo "tag=" >>"$GITHUB_OUTPUT"
+            echo "publish=false" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::タグ名は v で始めてください: $tag"; exit 1 ;;
+          esac
+
+          # repomonk --version は CARGO_PKG_VERSION 由来なので、ここがズレると
+          # 配布物が自分のバージョンについて嘘をつく。
+          tag_version="${tag#v}"
+          cargo_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ -z "$cargo_version" ]; then
+            echo "::error::Cargo.toml の version を読み取れませんでした"
+            exit 1
+          fi
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::タグ $tag と Cargo.toml の version $cargo_version が一致しません"
+            exit 1
+          fi
+
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "publish=$publish" >>"$GITHUB_OUTPUT"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-features
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          # glibc 互換性のため意図的に 22.04（glibc 2.35）でビルドする。
+          # ubuntu-latest だとより新しい glibc を要求してしまう。
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build
+        run: cargo build --release --locked --all-features --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          name="repomonk-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cp "target/${{ matrix.target }}/release/repomonk.exe" "dist/$name/"
+          else
+            cp "target/${{ matrix.target }}/release/repomonk" "dist/$name/"
+          fi
+          cp LICENSE README.md "dist/$name/"
+          # 依存クレートの表示義務を満たすため、生成済みの一覧を同梱する。
+          if [ -f THIRD-PARTY-LICENSES.md ]; then
+            cp THIRD-PARTY-LICENSES.md "dist/$name/"
+          fi
+
+          cd dist
+          # アーカイブ直下にファイルを置く。install.sh が展開してそのまま拾える。
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd "$name" && 7z a -tzip "../$name.zip" .)
+          else
+            tar -czf "$name.tar.gz" -C "$name" .
+          fi
+          rm -rf "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: repomonk-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: [verify, build]
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          set -eu
+          # 名前を明示して、SHA256SUMS 自身を巻き込まないようにする。
+          sha256sum repomonk-* >SHA256SUMS
+          cat SHA256SUMS
+
+      # 外部 Action にリリース権限を渡さず、ランナー同梱の gh と GITHUB_TOKEN で作る。
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: gh release create "$TAG" --generate-notes --verify-tag dist/*
