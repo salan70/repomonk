@@ -991,6 +991,13 @@ impl App {
                 }
                 Ok(false)
             }
+            KeyCode::Char('.') => {
+                if let Some(s) = &mut self.session {
+                    let progress = s.progress.clone();
+                    s.tree.toggle_hide_skipped(&progress);
+                }
+                Ok(false)
+            }
             KeyCode::Tab => {
                 if let Some(s) = &mut self.session {
                     s.tree.jump_recommend();

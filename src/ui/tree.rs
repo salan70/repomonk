@@ -60,7 +60,7 @@ pub struct TreeView {
     pub visible_rows: usize,
     /// Shown after Result Enter when the repository is fully done.
     pub repo_complete: bool,
-    /// Count of skipped files currently hidden by `hide_skipped`.
+    /// Count of skipped files, whether or not `hide_skipped` is currently hiding them.
     pub excluded: usize,
     /// One-line status/error banner (e.g. from the File types overlay), cleared on next input.
     pub message: Option<String>,
@@ -121,7 +121,7 @@ impl TreeView {
             filter_editing: false,
             visible_rows: 1,
             repo_complete: false,
-            excluded: excluded_count(progress, hide_skipped, &hidden_paths),
+            excluded: excluded_count(progress, &hidden_paths),
             message: None,
             hidden_paths,
         };
@@ -145,8 +145,9 @@ impl TreeView {
         let root = directory_progress(progress, "");
         self.overall = (root.completed_lines, root.total_lines);
         self.file_counts = (root.done_files, root.done_files + root.todo_files);
-        self.excluded = excluded_count(progress, self.hide_skipped, &self.hidden_paths);
-        let prev_path = self.selected_path();
+        self.excluded = excluded_count(progress, &self.hidden_paths);
+        let prev_paths: Vec<String> = self.rows.iter().map(row_path).collect();
+        let prev_selected = self.selected;
         self.rows = visible_rows(
             progress,
             &self.collapsed,
@@ -154,15 +155,22 @@ impl TreeView {
             &self.hidden_paths,
             &self.filter,
         );
-        if let Some(path) = prev_path {
-            if let Some(idx) = self.rows.iter().position(|r| row_path(r) == path) {
-                self.selected = idx;
-            } else {
-                self.selected = self.selected.min(self.rows.len().saturating_sub(1));
-            }
-        } else {
-            self.selected = self.selected.min(self.rows.len().saturating_sub(1));
-        }
+        self.selected = self
+            .surviving_row(&prev_paths, prev_selected)
+            .unwrap_or_else(|| self.selected.min(self.rows.len().saturating_sub(1)));
+    }
+
+    /// Keep the cursor on the row it was on. When that row is gone (e.g. an excluded
+    /// file after `.` re-hides it), fall back to the nearest row that survived,
+    /// searching upwards first so the cursor settles on the enclosing directory.
+    fn surviving_row(&self, prev_paths: &[String], prev_selected: usize) -> Option<usize> {
+        let index_of = |path: &String| self.rows.iter().position(|r| &row_path(r) == path);
+        let before = (0..=prev_selected).rev();
+        let after = (prev_selected + 1)..prev_paths.len();
+        before
+            .chain(after)
+            .filter_map(|i| prev_paths.get(i))
+            .find_map(index_of)
     }
 
     pub fn set_flow(&mut self, progress: &RepoProgress, flow: Option<FlowOrder>) {
@@ -174,21 +182,19 @@ impl TreeView {
         self.flow.as_ref().and_then(|order| order.step_number(path))
     }
 
+    /// Flip between hiding and showing excluded files for this session only;
+    /// `progress.hide_skipped` stays the startup default.
+    pub fn toggle_hide_skipped(&mut self, progress: &RepoProgress) {
+        self.hide_skipped = !self.hide_skipped;
+        self.refresh_rows(progress);
+    }
+
     pub fn move_by(&mut self, delta: isize) {
         if self.rows.is_empty() || delta == 0 {
             return;
         }
         let len = self.rows.len() as isize;
-        let direction = delta.signum();
-        let mut next = (self.selected as isize + delta).rem_euclid(len);
-
-        for _ in 0..self.rows.len() {
-            if self.rows[next as usize].status != Some(FileStatus::Skipped) {
-                self.selected = next as usize;
-                return;
-            }
-            next = (next + direction).rem_euclid(len);
-        }
+        self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
     }
 
     pub fn selected_file_path(&self) -> Option<String> {
@@ -337,12 +343,8 @@ impl TreeView {
 
 fn excluded_count(
     progress: &RepoProgress,
-    hide_skipped: bool,
     hidden_paths: &std::collections::HashSet<String>,
 ) -> usize {
-    if !hide_skipped {
-        return 0;
-    }
     progress
         .files
         .iter()
@@ -726,10 +728,12 @@ fn info_line(view: &TreeView, width: u16) -> Line<'static> {
         ));
     }
     let left = selected_detail(view);
-    let right = if view.excluded > 0 {
-        format!("{} excluded · t", view.excluded)
-    } else {
+    let right = if view.excluded == 0 {
         String::new()
+    } else if view.hide_skipped {
+        format!("{} excluded · .", view.excluded)
+    } else {
+        format!("{} excluded shown · .", view.excluded)
     };
     let pad = (width as usize).saturating_sub(left.chars().count() + right.chars().count() + 2);
     Line::from(vec![
@@ -989,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn vertical_movement_selects_directories_and_enabled_files() {
+    fn vertical_movement_stops_on_excluded_rows_while_shown() {
         let mut progress = progress();
         progress.files[1].manual_override = Some(crate::domain::content::ManualOverride::Skip);
         let mut tree = tree_view(&progress, false);
@@ -1007,8 +1011,103 @@ mod tests {
         tree.move_by(1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("src/a.rs"));
 
+        // The excluded file is reachable so `x` can rescue it.
+        tree.move_by(1);
+        assert_eq!(tree.selected_file_path().as_deref(), Some("src/b.rs"));
+
         tree.move_by(1);
         assert_eq!(tree.selected_file_path().as_deref(), Some("lib.rs"));
+    }
+
+    #[test]
+    fn toggle_hide_skipped_reveals_and_rehides_excluded_rows() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        let mut tree = tree_view(&progress, true);
+        assert!(tree.hide_skipped);
+        let hidden: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(!hidden.contains(&"tests"));
+
+        tree.toggle_hide_skipped(&progress);
+        assert!(!tree.hide_skipped);
+        let shown: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(shown.contains(&"tests"));
+        assert!(shown.contains(&"foo.rs"));
+
+        tree.toggle_hide_skipped(&progress);
+        assert!(tree.hide_skipped);
+        let names: Vec<_> = tree.rows.iter().map(|r| r.name.as_str()).collect();
+        assert!(!names.contains(&"tests"));
+        assert!(!names.contains(&"foo.rs"));
+    }
+
+    #[test]
+    fn toggling_keeps_the_cursor_on_the_selected_row() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        let mut tree = tree_view(&progress, true);
+        assert!(tree.jump_to_path("src/b.rs"));
+
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.selected_path().as_deref(), Some("src/b.rs"));
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.selected_path().as_deref(), Some("src/b.rs"));
+    }
+
+    #[test]
+    fn rehiding_the_selected_excluded_row_falls_back_to_the_nearest_row_above() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        let mut tree = tree_view(&progress, false);
+        tree.collapsed.clear();
+        tree.refresh_rows(&progress);
+        assert!(tree.jump_to_path("tests/foo.rs"));
+
+        // `tests/` holds nothing else, so both it and the file disappear.
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.selected_path().as_deref(), Some("lib.rs"));
+    }
+
+    #[test]
+    fn info_line_labels_both_excluded_modes() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        let mut tree = tree_view(&progress, true);
+
+        let hidden: String = info_line(&tree, 100)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(hidden.contains("1 excluded · ."), "{hidden}");
+
+        tree.toggle_hide_skipped(&progress);
+        let shown: String = info_line(&tree, 100)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(shown.contains("1 excluded shown · ."), "{shown}");
+    }
+
+    #[test]
+    fn excluded_count_is_independent_of_hide_skipped() {
+        let mut progress = progress();
+        progress
+            .files
+            .push(skipped_file("tests/foo.rs", SkipReason::TestFile));
+        let mut tree = tree_view(&progress, true);
+        assert_eq!(tree.excluded, 1);
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.excluded, 1);
     }
 
     #[test]

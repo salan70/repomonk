@@ -106,6 +106,7 @@ fn context_lines(ctx: HelpContext) -> Vec<Line<'static>> {
             hint("Tab", "next file"),
             hint("/", "filter"),
             hint("x/X", "skip / reset"),
+            hint(".", "show / hide excluded"),
             hint("h/l", "fold"),
             hint("e", "how to proceed"),
             hint("t", "file types"),
