@@ -38,6 +38,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
+## Git運用ルール
+
+- 作業ブランチを切らず、`main`に直接コミットする。
+- ユーザーがコミットを指示した場合、確認を挟まずそのまま`origin/main`へ
+  プッシュする。
+- コミットメッセージはConventional Commits形式、本文は日本語で書く。
+
 ## AIエージェントによる実装
 
 - 実装単位はリリース段階ではなく、`docs/implementation-plan.md`に定める
