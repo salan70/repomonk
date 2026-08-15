@@ -58,6 +58,9 @@ pub struct TreeView {
     pub filter_editing: bool,
     /// Last drawn list height, used for half-page jumps.
     pub visible_rows: usize,
+    /// Index of the first row drawn. Owned here rather than left to the list widget
+    /// so rebuilding the tree keeps the cursor on the same screen line.
+    pub offset: usize,
     /// Shown after Result Enter when the repository is fully done.
     pub repo_complete: bool,
     /// Count of skipped files, whether or not `hide_skipped` is currently hiding them.
@@ -120,6 +123,7 @@ impl TreeView {
             filter: String::new(),
             filter_editing: false,
             visible_rows: 1,
+            offset: 0,
             repo_complete: false,
             excluded: excluded_count(progress, &hidden_paths),
             message: None,
@@ -148,6 +152,7 @@ impl TreeView {
         self.excluded = excluded_count(progress, &self.hidden_paths);
         let prev_paths: Vec<String> = self.rows.iter().map(row_path).collect();
         let prev_selected = self.selected;
+        let screen_row = prev_selected.saturating_sub(self.offset);
         self.rows = visible_rows(
             progress,
             &self.collapsed,
@@ -158,6 +163,25 @@ impl TreeView {
         self.selected = self
             .surviving_row(&prev_paths, prev_selected)
             .unwrap_or_else(|| self.selected.min(self.rows.len().saturating_sub(1)));
+        // Scroll so the cursor stays on the screen line it was already on.
+        self.offset = self.selected.saturating_sub(screen_row);
+        self.clamp_offset();
+    }
+
+    fn select_index(&mut self, index: usize) {
+        self.selected = index;
+        self.clamp_offset();
+    }
+
+    /// Keep `offset` in range and the cursor inside the drawn window.
+    fn clamp_offset(&mut self) {
+        let height = self.visible_rows.max(1);
+        self.offset = self.offset.min(self.rows.len().saturating_sub(height));
+        if self.selected < self.offset {
+            self.offset = self.selected;
+        } else if self.selected >= self.offset + height {
+            self.offset = self.selected + 1 - height;
+        }
     }
 
     /// Keep the cursor on the row it was on. When that row is gone (e.g. an excluded
@@ -194,7 +218,7 @@ impl TreeView {
             return;
         }
         let len = self.rows.len() as isize;
-        self.selected = (self.selected as isize + delta).rem_euclid(len) as usize;
+        self.select_index((self.selected as isize + delta).rem_euclid(len) as usize);
     }
 
     pub fn selected_file_path(&self) -> Option<String> {
@@ -216,11 +240,11 @@ impl TreeView {
     }
 
     pub fn select_first(&mut self) {
-        self.selected = 0;
+        self.select_index(0);
     }
 
     pub fn select_last(&mut self) {
-        self.selected = self.rows.len().saturating_sub(1);
+        self.select_index(self.rows.len().saturating_sub(1));
     }
 
     pub fn page_by(&mut self, direction: isize) {
@@ -234,7 +258,7 @@ impl TreeView {
             .iter()
             .position(|r| matches!(&r.kind, TreeRowKind::File { path: p } if p == path))
         {
-            self.selected = idx;
+            self.select_index(idx);
             true
         } else {
             false
@@ -259,7 +283,7 @@ impl TreeView {
                 (self.selected + offset) % len
             };
             if matches!(self.rows[idx].kind, TreeRowKind::File { .. }) {
-                self.selected = idx;
+                self.select_index(idx);
                 return;
             }
         }
@@ -319,7 +343,7 @@ impl TreeView {
                 .iter()
                 .position(|r| matches!(&r.kind, TreeRowKind::Dir { path: dp } if dp == &p))
             {
-                self.selected = idx;
+                self.select_index(idx);
                 return;
             }
             current = parent_path(&p);
@@ -690,7 +714,7 @@ pub fn draw_tree(frame: &mut Frame, area: Rect, view: &TreeView) {
         .map(|row| ListItem::new(row_line(row, view, list_pane.width)))
         .collect();
 
-    let mut state = ListState::default();
+    let mut state = ListState::default().with_offset(view.offset);
     if !view.rows.is_empty() {
         state.select(Some(view.selected));
     }
@@ -1056,6 +1080,78 @@ mod tests {
         assert_eq!(tree.selected_path().as_deref(), Some("src/b.rs"));
         tree.toggle_hide_skipped(&progress);
         assert_eq!(tree.selected_path().as_deref(), Some("src/b.rs"));
+    }
+
+    /// Excluded files sit above the row under the cursor, so revealing them pushes
+    /// that row far down the list. Without an owned offset the list widget would
+    /// scroll it to the bottom edge instead of leaving it where it was.
+    fn progress_with_excluded_above() -> RepoProgress {
+        let mut files: Vec<FileProgress> = (0..5)
+            .map(|i| file(&format!("src/a{i:02}.rs"), "a"))
+            .collect();
+        files.extend(
+            (0..30).map(|i| skipped_file(&format!("src/z{i:02}.rs"), SkipReason::TestFile)),
+        );
+        files.extend((0..30).map(|i| file(&format!("src/b{i:02}.rs"), "b")));
+        RepoProgress { files }
+    }
+
+    #[test]
+    fn toggling_keeps_the_cursor_on_the_same_screen_line() {
+        let progress = progress_with_excluded_above();
+        let mut tree = tree_view(&progress, true);
+        tree.visible_rows = 14;
+        assert!(tree.jump_to_path("src/b02.rs"));
+
+        let screen_line = tree.selected - tree.offset;
+        assert!(screen_line < tree.visible_rows);
+
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.selected_path().as_deref(), Some("src/b02.rs"));
+        assert_eq!(tree.selected - tree.offset, screen_line);
+
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(tree.selected_path().as_deref(), Some("src/b02.rs"));
+        assert_eq!(tree.selected - tree.offset, screen_line);
+    }
+
+    /// Screen line (within the list pane) that the cursor is drawn on, read back
+    /// from a real render so the assertion covers the list widget's own scrolling.
+    fn drawn_cursor_line(view: &TreeView, width: u16, height: u16) -> Option<usize> {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw_tree(frame, frame.area(), view))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let selected = view.rows.get(view.selected)?;
+        let list_top = 3; // border + gauge + Next
+        (0..list_height(Rect::new(0, 0, width, height))).find(|i| {
+            let y = (list_top + i) as u16;
+            let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+            line.contains(&selected.name)
+        })
+    }
+
+    #[test]
+    fn toggling_draws_the_cursor_on_the_same_screen_line() {
+        let progress = progress_with_excluded_above();
+        let (width, height) = (60, 20);
+
+        let mut tree = tree_view(&progress, true);
+        tree.visible_rows = list_height(Rect::new(0, 0, width, height));
+        assert!(tree.jump_to_path("src/b02.rs"));
+
+        let before = drawn_cursor_line(&tree, width, height);
+        assert!(before.is_some(), "cursor row should be on screen");
+
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(drawn_cursor_line(&tree, width, height), before);
+
+        tree.toggle_hide_skipped(&progress);
+        assert_eq!(drawn_cursor_line(&tree, width, height), before);
     }
 
     #[test]
