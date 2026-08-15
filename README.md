@@ -23,7 +23,7 @@ cargo run -- --purge
 - 共通: Esc/`q` で戻る（Home の `q` だけ終了）、`?` ヘルプ、`,` 設定、`S` 実績
 - Home: `j`/`k` 選択、Enter で開く、`/` 検索
 - Tree: `j`/`k` 移動、Enter で写経、`Tab` でおすすめ、`/` 絞り込み、`x`/`X` で対象の切替
-- Typing: 正しいキーのみ受理、Backspace、Esc でポーズ
+- Typing: 正しいキーのみ受理、Backspace、Esc でポーズ（もう一度 Esc で Tree へ戻る）
 - Result: Enter で次へ、`r` でもう一度、Esc で Tree へ
 
 ## ドキュメント
