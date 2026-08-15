@@ -48,6 +48,26 @@ cargo test --all-features
   プッシュする。
 - コミットメッセージはConventional Commits形式、本文は日本語で書く。
 
+## リリース運用ルール
+
+- リリースは`vX.Y.Z`タグのpushによってのみ行う。タグ名は`Cargo.toml`の
+  `version`と一致させる。`repomonk --version`は`CARGO_PKG_VERSION`由来のため、
+  ズレると配布物が自分のバージョンについて嘘をつく。
+- **エージェントはユーザーの明示指示なしにタグをpushしない。** 通常のコミットは
+  従来どおり確認なしで`origin/main`へpushしてよいが、タグはビルド済みバイナリを
+  外部へ公開する操作なので区別する。
+- 一度pushしたタグは打ち直さず、削除もしない。誤った場合は次のパッチ版を出す。
+  すでに`install.sh`経由で入れた利用者がいる前提で考える。
+- 0.xの間は、ユーザーから見える挙動の破壊的変更でminor、それ以外でpatchを上げる。
+- `CHANGELOG.md`は持たない。リリースノートは`gh release --generate-notes`が
+  コミット一覧から生成するため、Conventional Commitsの遵守がそのまま
+  リリースノートの品質になる。
+- `main`にbranch protectionはかけない。品質ゲートは
+  `.github/workflows/release.yml`の`verify`ジョブに置き、赤いままリリースが
+  出ていかないようにする。CI（`.github/workflows/ci.yml`）は通知装置として扱う。
+- 依存クレートを増減したら`THIRD-PARTY-LICENSES.md`を再生成する。手順は
+  `docs/development.md`を参照。
+
 ## AIエージェントによる実装
 
 - 実装単位はリリース段階ではなく、`docs/implementation-plan.md`に定める

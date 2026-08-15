@@ -47,13 +47,51 @@
 
 ## 実装開始後に必須
 
-- Rustツールチェーンを固定し、アプリケーションとして`Cargo.lock`をコミットする。
-- `cargo fmt`、`cargo clippy`、`cargo test`を実行するGitHub Actionsを追加する。
-- 依存クレートのライセンスと配布条件を確認する。
-- fixtureには第三者リポジトリのコードを無断転載せず、自作の最小コードを使う。
-- リリースバイナリを配布する場合、対応OS、検証方法、同梱ライセンスを明記する。
-- READMEにインストール方法、対応環境、開発状態、データ保存先、`--purge`を記載する。
-- 脆弱性報告を受け付ける場合は`SECURITY.md`と連絡方法を追加する。
+- [x] Rustツールチェーンを固定し、アプリケーションとして`Cargo.lock`をコミットする。
+  `rust-toolchain.toml`で`stable`と`rustfmt`/`clippy`を指定し、`Cargo.lock`は
+  コミット済み。
+- [x] `cargo fmt`、`cargo clippy`、`cargo test`を実行するGitHub Actionsを追加する。
+  `.github/workflows/ci.yml`（`main`へのpushとPR）と
+  `.github/workflows/release.yml`の`verify`ジョブ（タグ時）で実行する。
+  `main`へのbranch protectionはかけず、リリース経路の側でゲートする（D-034）。
+- [x] 依存クレートのライセンスと配布条件を確認する。詳細は後述の
+  「依存クレートのライセンス確認」を参照。
+- [x] fixtureには第三者リポジトリのコードを無断転載せず、自作の最小コードを使う。
+  `tests/fixtures/`は自作の最小コードのみで構成している。
+- [x] リリースバイナリを配布する場合、対応OS、検証方法、同梱ライセンスを明記する。
+  対応OSはREADMEの「対応環境」、検証方法はReleasesの`SHA256SUMS`（`install.sh`が
+  自動照合）、同梱ライセンスは`THIRD-PARTY-LICENSES.md`をアーカイブへ同梱。
+- [x] READMEにインストール方法、対応環境、開発状態、データ保存先、`--purge`を記載する。
+- [x] 脆弱性報告を受け付ける場合は`SECURITY.md`と連絡方法を追加する。
+  `SECURITY.md`を追加済み。GitHub設定でPrivate vulnerability reportingを
+  有効化する作業が残っている。
+
+## 依存クレートのライセンス確認
+
+2026-08-15時点、`cargo metadata --all-features`で解決される195クレートを確認した。
+
+- GPL、AGPL、CDDL、EPLは0件。すべてpermissiveなライセンス。
+- 内訳の大半は`MIT OR Apache-2.0`（118）と`MIT`（37）。
+- `option-ext 0.2.0`（`dirs`経由）のみMPL-2.0。ファイル単位のcopyleftであり、
+  当該クレートを改変せずリンクする使い方では自プロジェクトの開示義務は生じない。
+  表示義務は残るため同梱一覧に含める。
+- `r-efi 6.0.0`はLGPL-2.1-or-laterも選択肢に含むが、`MIT OR Apache-2.0`を
+  選択できる。加えてUEFIターゲット用であり、配布する3ターゲットでは
+  実際にはリンクされない。
+- `(MIT OR Apache-2.0) AND Unicode-3.0`が1件あり、Unicodeライセンスの表示が要る。
+
+同梱物として特に確認したもの:
+
+- `libsqlite3-sys`はMITで、一覧に含まれる。同梱されるSQLite本体のCソースは
+  public domainであり、追加の表示義務はない。
+- `syntect`が同梱するシンタックス定義は、`syntect`クレート自体のライセンス表示に
+  含まれる形で扱う。
+
+表示は`cargo about`が生成する`THIRD-PARTY-LICENSES.md`を正とし、依存を増減した
+ときに再生成する。手順は`docs/development.md`§8.3。生成対象は配布する3ターゲット
+の実行時依存に絞っており、2026-08-15時点で162クレート（MIT 158、Apache-2.0 1、
+MPL-2.0 1、Unicode-3.0 1、Zlib 1）。デュアルライセンスのクレートは、repomonk自身の
+ライセンスに合わせてMITへ解決している。
 
 ## 実装時のセキュリティ条件
 

@@ -87,3 +87,73 @@ TUIの正しさはスナップショットだけに頼りません。PTYまた�
 
 統合担当は、受け入れ条件、品質ゲート、手動スモークの結果をまとめてMVP完成を
 判断します。
+
+## 8. 配布とリリース
+
+### 8.1 仕組み
+
+配布はGitHub Releasesのビルド済みバイナリと`install.sh`だけで行い、
+crates.io、npm、Homebrewへは公開しません。ワークフローは2つです。
+
+- `.github/workflows/ci.yml` — `main`へのpushとPRで品質ゲートを回す通知装置。
+  `main`にbranch protectionはかけないため、これは赤くても作業を止めません。
+- `.github/workflows/release.yml` — `vX.Y.Z`タグのpushで動きます。
+  `verify`ジョブがタグ名と`Cargo.toml`の`version`の一致を確認し、品質ゲートを
+  再実行します。ここを通らない限りバイナリは外へ出ません。その後
+  3ターゲットをビルドし、`SHA256SUMS`を添えてReleaseを作ります。
+
+ビルド対象は次の3つです。Linuxはglibc互換性のため意図的に`ubuntu-22.04`
+（glibc 2.35）でビルドします。`ubuntu-latest`だとより新しいglibcを要求します。
+
+| ランナー | ターゲット | 形式 |
+| --- | --- | --- |
+| `macos-latest` | `aarch64-apple-darwin` | tar.gz |
+| `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | tar.gz |
+| `windows-latest` | `x86_64-pc-windows-msvc` | zip |
+
+### 8.2 リリース手順
+
+1. `Cargo.toml`の`version`を上げ、`cargo build`で`Cargo.lock`も更新する。
+   0.xの間は、ユーザーから見える挙動の破壊的変更でminor、それ以外でpatch。
+2. 依存クレートを増減した場合は`THIRD-PARTY-LICENSES.md`を再生成する（8.3）。
+3. 品質ゲート3コマンドをローカルで通す。
+4. `main`へコミットしてpushし、CIが緑になることを確認する。
+5. タグを打つ。**ユーザーの明示指示なしにこの操作をしない。**
+
+   ```sh
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+6. Actionsの成功と、Releaseに資材4点（tar.gz×2、zip×1、`SHA256SUMS`）が
+   揃っていることを確認する。
+7. 一度pushしたタグは打ち直さず、削除もしない。誤った場合は次のパッチ版を出す。
+
+タグを打つ前に動作確認したい場合は、`release.yml`を`workflow_dispatch`で
+実行します。`tag`入力を空にするとビルドまで走らせてReleaseを作りません。
+タグ名を入れると`verify`のバージョン照合だけ試せます。
+
+### 8.3 サードパーティライセンスの再生成
+
+配布アーカイブに`THIRD-PARTY-LICENSES.md`を同梱しています。依存クレートを
+増減したら再生成してください。CIには入れていないので手作業です。
+
+```sh
+cargo install cargo-about --locked   # 初回のみ
+cargo about generate --all-features -o THIRD-PARTY-LICENSES.md about.hbs
+```
+
+新しいライセンスが増えて生成が失敗した場合は、内容を確認したうえで
+`about.toml`の`accepted`へ追加します。GPL系が混ざった場合は、追加せずに
+依存の採用そのものを見直してください。
+
+### 8.4 手元での確認
+
+インストール経路を試すときは、既存のインストールと本番のDBを壊さないよう
+分離します。
+
+```sh
+REPOMONK_INSTALL_DIR=/tmp/rmtest sh install.sh
+REPOMONK_CACHE_DIR=/tmp/rmcache REPOMONK_DATA_DIR=/tmp/rmdata \
+  /tmp/rmtest/repomonk salan70/repomonk-sample-typescript
+```

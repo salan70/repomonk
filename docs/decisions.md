@@ -944,3 +944,78 @@ Tree を見ながら一時的に確認する操作と、既定を変える操作
   受け入れ条件 3 と 8、`README.md` の操作の目安を更新する。
 - D-023 のチェックポイント方針そのもの（保存項目、1 秒間隔、refresh 時のハッシュ照合）は
   変えない。Pause 中の経過時間の扱いだけを置き換える。
+
+## D-034: 配布はGitHub Releasesとinstall.shで行い、mainの直コミット運用は維持する
+
+- 状態: 採用
+- 日付: 2026-08-15
+
+### 決定
+
+知り合いに使ってもらうための配布導線を、次の構成に決めます。
+
+- ビルド済みバイナリをGitHub Releasesへ置き、`install.sh`を
+  `curl -fsSL ... | sh`で実行してもらう。crates.io、npm、Homebrew tapへは
+  公開しない。
+- ビルド対象はmacOS `aarch64-apple-darwin`、Linux `x86_64-unknown-linux-gnu`、
+  Windows `x86_64-pc-windows-msvc`の3つ。Windowsはバイナリを出すだけで
+  動作を保証しない。
+- Linuxのビルドは`ubuntu-latest`ではなく`ubuntu-22.04`で行う。
+- `install.sh`はGitHub APIを叩かず、`releases/latest/download/`の
+  リダイレクトだけを使う。ダウンロードした資材は`SHA256SUMS`と照合し、
+  一致しなければ中止する。
+- `main`への直コミット運用は変えず、branch protectionもrulesetもかけない。
+  CIは通知装置として置き、品質ゲートは`release.yml`の`verify`ジョブに置く。
+  `verify`はタグ名と`Cargo.toml`の`version`の一致も検査する。
+- `CHANGELOG.md`は持たず、リリースノートは`gh release --generate-notes`に
+  委ねる。バージョンはSemVerとし、0.xの間は破壊的変更でminorを上げる。
+- 依存クレートのライセンス表示は`cargo about`で`THIRD-PARTY-LICENSES.md`を
+  生成し、リポジトリと配布アーカイブの両方に置く。再生成は手作業とする。
+- コード署名と公証は行わない。
+
+### 理由
+
+- 現状インストール手段がなく、READMEの例がすべて`cargo run`だった。
+  `rusqlite`のbundled SQLiteとtree-sitterのgrammarがCコンパイラを要求するため、
+  ソースからのビルドを前提にすると、Rustを持たない知り合いには渡せない。
+- パッケージマネージャ配布は、名前の確保、公開の取り消しにくさ、tapの保守が
+  増える。「知り合いが試せる」ために必要な範囲を超えるため、今回は採らない。
+- branch protectionを入れると`main`直pushが全面的に止まり、AGENTS.mdの
+  Git運用ルールと正面衝突する。一方で他人が使うバイナリを配る以上、壊れたコードが
+  そのまま配布物になる経路は塞ぐ必要がある。両立させるため、ゲートを
+  「mainへのpush」ではなく「外へ出るタグ」の側へ置いた。途中経過が赤くても
+  作業は止まらず、赤いままリリースは出ない。
+- `ubuntu-latest`（glibc 2.39）でビルドすると、少し古いディストリビューションで
+  動かないバイナリになる。配る相手の環境を選ばないほうがよいため、
+  意図的に古いランナーを固定する。
+- GitHub APIを使わない方針は本体の実装ルールにもあり、レート制限を避けられる。
+  導線側も同じ流儀に揃えておくと、説明が一貫する。
+- `repomonk --version`は`CARGO_PKG_VERSION`由来のため、タグと`Cargo.toml`が
+  ズレると配布物が自分のバージョンについて嘘をつく。人手の注意ではなく
+  ワークフローで落とす。
+- 依存195クレートのライセンスを確認したところ、GPL、AGPL、CDDL、EPLは0件で、
+  `MIT OR Apache-2.0`が大半だった。`option-ext`のMPL-2.0はファイル単位の
+  copyleftで、改変せずリンクする使い方では自分のコードの開示義務が生じない。
+  バイナリ配布に支障はないが、表示義務は残るため同梱する。
+
+### 影響
+
+- `.github/workflows/ci.yml`と`.github/workflows/release.yml`を新規に追加する。
+  `.github/`ディレクトリ自体がこれまで存在しなかった。
+- `install.sh`を新規に追加する。`REPOMONK_VERSION`と`REPOMONK_INSTALL_DIR`で
+  バージョンと配置先を差し替えられるようにする。
+- `about.toml`、`about.hbs`、`THIRD-PARTY-LICENSES.md`を追加する。
+- `SECURITY.md`を追加する。外部送信がないという前提のもとで、想定するリスクを
+  `git`の引数組み立て、シンボリックリンク、`--purge`の削除対象検証に絞って書く。
+  GitHubのPrivate vulnerability reportingの有効化はリポジトリ設定側の作業になる。
+- `AGENTS.md`に「リリース運用ルール」を新設する。既存の「Git運用ルール」は
+  変更しない。エージェントはユーザーの明示指示なしにタグをpushしない。
+- `README.md`にインストール節、対応環境、データの保存先、アンインストール手順を
+  足し、使い方の例を`cargo run --`から`repomonk`へ書き換える。`cargo run`の例は
+  開発節へ移す。
+- `docs/development.md`に§8「配布とリリース」を足す。リリース手順を自動化しない
+  ぶん、この手順書が正になる。
+- `docs/public-release-checklist.md`の「実装開始後に必須」のうち、CI追加、
+  依存ライセンス確認、リリースバイナリの明記、READMEの記載、`SECURITY.md`の
+  5項目を対応済みにする。
+- 実装コードは変更しない。
