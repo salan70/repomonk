@@ -30,6 +30,11 @@ impl TerminalGuard {
         enable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))?;
         let mut stdout = io::stdout();
         let keyboard_enhancement_enabled = matches!(supports_keyboard_enhancement(), Ok(true));
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+            .map_err(|e| Error::Terminal(e.to_string()))?;
+        // The keyboard enhancement stack is per-screen, so push only after entering
+        // the alternate screen. Pushing on the main screen would leave the flags
+        // active there after exit, and the shell would receive CSI u escape codes.
         if keyboard_enhancement_enabled {
             execute!(
                 stdout,
@@ -37,8 +42,6 @@ impl TerminalGuard {
             )
             .map_err(|e| Error::Terminal(e.to_string()))?;
         }
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .map_err(|e| Error::Terminal(e.to_string()))?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).map_err(|e| Error::Terminal(e.to_string()))?;
         Ok(Self {
@@ -56,30 +59,47 @@ impl TerminalGuard {
         if self.restored {
             return Ok(());
         }
-        disable_raw_mode().map_err(|e| Error::Terminal(e.to_string()))?;
+        // Mark restored up front: every step below is best-effort, and a partial
+        // failure must not leave the terminal in raw mode on a retry.
+        self.restored = true;
+        let mut first_err = None;
+        let mut record = |res: io::Result<()>| {
+            if let Err(e) = res {
+                first_err.get_or_insert(Error::Terminal(e.to_string()));
+            }
+        };
+        // Pop while still on the alternate screen, mirroring the push in `enter`.
         if self.keyboard_enhancement_enabled {
-            execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags)
-                .map_err(|e| Error::Terminal(e.to_string()))?;
+            record(execute!(
+                self.terminal.backend_mut(),
+                PopKeyboardEnhancementFlags
+            ));
         }
-        execute!(
+        record(execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
             DisableMouseCapture
-        )
-        .map_err(|e| Error::Terminal(e.to_string()))?;
-        self.terminal
-            .show_cursor()
-            .map_err(|e| Error::Terminal(e.to_string()))?;
-        self.restored = true;
-        Ok(())
+        ));
+        record(self.terminal.show_cursor());
+        record(disable_raw_mode());
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
 fn keyboard_repeat_flags() -> KeyboardEnhancementFlags {
     // REPORT_ALL_KEYS_AS_ESCAPE_CODES is required for Repeat events on plain-text
     // keys such as j and k, not only on special keys.
+    //
+    // REPORT_ALTERNATE_KEYS is mandatory alongside it: escape-code reporting sends
+    // the unshifted key code, so without the alternate (shifted) key code Shift+a
+    // arrives as Char('a') + SHIFT and Shift+9 as Char('9') + SHIFT. Typing would
+    // then reject every uppercase letter and shifted symbol.
     KeyboardEnhancementFlags::REPORT_EVENT_TYPES
         | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 impl Drop for TerminalGuard {
@@ -97,5 +117,11 @@ mod tests {
         let flags = keyboard_repeat_flags();
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
         assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+    }
+
+    #[test]
+    fn keyboard_enhancement_reports_shifted_characters() {
+        // Without alternate keys, Shift+a would arrive as Char('a') + SHIFT.
+        assert!(keyboard_repeat_flags().contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
     }
 }

@@ -1111,7 +1111,7 @@ impl App {
             KeyCode::Enter => TypingCommand::Enter,
             KeyCode::Backspace => TypingCommand::Backspace,
             KeyCode::Tab => TypingCommand::Char('\t'),
-            KeyCode::Char(c) => TypingCommand::Char(c),
+            KeyCode::Char(c) => TypingCommand::Char(shift_applied(c, key.modifiers)),
             _ => return Ok(false),
         };
         let finished = self.session.as_mut().and_then(|session| {
@@ -1875,6 +1875,17 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Fallback for terminals that report keys as escape codes without alternate keys:
+/// there Shift+a arrives as `Char('a')` with SHIFT still set. Terminals that do send
+/// alternate keys resolve the character themselves and clear SHIFT, so this is a no-op.
+fn shift_applied(c: char, modifiers: KeyModifiers) -> char {
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        c.to_uppercase().next().unwrap_or(c)
+    } else {
+        c
+    }
 }
 
 /// Headless helper for integration tests: open, complete first file programmatically.
