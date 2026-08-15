@@ -426,10 +426,18 @@ fn header_label(view: &TreeView, t: &UiStrings) -> String {
     let pct = format!("{:.0}%", ratio * 100.0);
     if view.flow.is_some() {
         let (done, files) = view.flow_counts.unwrap_or(view.file_counts);
-        format!("{pct}  ·  {done}/{files} {}", t.files_in_flow)
+        format!(
+            "{pct}{sep}{done}/{files} {}",
+            t.files_in_flow,
+            sep = theme::FIELD_SEP
+        )
     } else {
         let (done, files) = view.file_counts;
-        format!("{pct}  ·  {done}/{files} {}", t.files)
+        format!(
+            "{pct}{sep}{done}/{files} {}",
+            t.files,
+            sep = theme::FIELD_SEP
+        )
     }
 }
 
@@ -439,17 +447,28 @@ fn next_line(view: &TreeView, t: &UiStrings) -> Line<'static> {
             let text = if view.flow.is_some() {
                 if let Some(step) = view.flow_step_number(path) {
                     format!(
-                        " ▸ {}  {} {step} · {path} · {}",
-                        t.next_label, t.next_step, t.enter_to_start
+                        " ▸ {}  {} {step}{sep}{path}{sep}{}",
+                        t.next_label,
+                        t.next_step,
+                        t.enter_to_start,
+                        sep = theme::FIELD_SEP
                     )
                 } else {
-                    format!(" ▸ {}  {path} · {}", t.next_label, t.enter_to_start)
+                    format!(
+                        " ▸ {}  {path}{sep}{}",
+                        t.next_label,
+                        t.enter_to_start,
+                        sep = theme::FIELD_SEP
+                    )
                 }
             } else {
                 let lines = view.recommend_lines.unwrap_or(0);
                 format!(
-                    " ▸ {}  {path} · {lines} {} · {}",
-                    t.next_label, t.lines, t.enter_to_start
+                    " ▸ {}  {path}{sep}{lines} {}{sep}{}",
+                    t.next_label,
+                    t.lines,
+                    t.enter_to_start,
+                    sep = theme::FIELD_SEP
                 )
             };
             Line::from(Span::styled(
@@ -855,9 +874,19 @@ fn info_line(view: &TreeView, width: u16, t: &UiStrings) -> Line<'static> {
     let right = if view.excluded == 0 {
         String::new()
     } else if view.hide_skipped {
-        format!("{} {} · .", view.excluded, t.excluded)
+        format!(
+            "{} {}{sep}.",
+            view.excluded,
+            t.excluded,
+            sep = theme::FIELD_SEP
+        )
     } else {
-        format!("{} {} · .", view.excluded, t.excluded_shown)
+        format!(
+            "{} {}{sep}.",
+            view.excluded,
+            t.excluded_shown,
+            sep = theme::FIELD_SEP
+        )
     };
     let pad = (width as usize).saturating_sub(display_width(&left) + display_width(&right) + 2);
     Line::from(vec![
@@ -875,25 +904,36 @@ fn selected_detail(view: &TreeView, t: &UiStrings) -> String {
         TreeRowKind::File { path } => {
             let mut text = if row.manual_skip || row.skip_reason.is_some() {
                 format!(
-                    "{path} · {}",
-                    t.skip_full_opt(row.skip_reason.as_ref(), row.manual_skip)
+                    "{path}{sep}{}",
+                    t.skip_full_opt(row.skip_reason.as_ref(), row.manual_skip),
+                    sep = theme::FIELD_SEP
                 )
             } else if let Some((done, total)) = row.progress {
-                format!("{path} · {total} {} · {done} {}", t.lines, t.done)
+                format!(
+                    "{path}{sep}{total} {}{sep}{done} {}",
+                    t.lines,
+                    t.done,
+                    sep = theme::FIELD_SEP
+                )
             } else {
                 path.clone()
             };
             if let Some(origin) = selected_origin(view, t) {
-                text.push_str(" · ");
+                text.push_str(theme::FIELD_SEP);
                 text.push_str(&origin);
             }
             text
         }
         TreeRowKind::Dir { path } => {
             let (done, total) = row.file_counts.unwrap_or((0, 0));
-            let mut text = format!("{path}/ · {total} {} · {done} {}", t.files, t.done);
+            let mut text = format!(
+                "{path}/{sep}{total} {}{sep}{done} {}",
+                t.files,
+                t.done,
+                sep = theme::FIELD_SEP
+            );
             if let Some(flow) = &view.flow {
-                text.push_str(" · ");
+                text.push_str(theme::FIELD_SEP);
                 text.push_str(t.entry);
                 text.push(' ');
                 text.push_str(&flow.entry);
@@ -1352,7 +1392,10 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(hidden.contains("1 excluded · ."), "{hidden}");
+        assert!(
+            hidden.contains(&format!("1 excluded{}.", theme::FIELD_SEP)),
+            "{hidden}"
+        );
 
         tree.toggle_hide_skipped(&progress);
         let shown: String = info_line(&tree, 100, en())
@@ -1360,7 +1403,10 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(shown.contains("1 excluded shown · ."), "{shown}");
+        assert!(
+            shown.contains(&format!("1 excluded shown{}.", theme::FIELD_SEP)),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -1563,9 +1609,15 @@ mod tests {
     fn detail_row_summarizes_selected_file_and_dir() {
         let progress = progress();
         let mut tree = tree_view(&progress, false);
-        assert_eq!(selected_detail(&tree, en()), "src/a.rs · 1 lines · 0 done");
+        assert_eq!(
+            selected_detail(&tree, en()),
+            format!("src/a.rs{sep}1 lines{sep}0 done", sep = theme::FIELD_SEP)
+        );
         tree.move_by(-1);
-        assert_eq!(selected_detail(&tree, en()), "src/ · 2 files · 0 done");
+        assert_eq!(
+            selected_detail(&tree, en()),
+            format!("src/{sep}2 files{sep}0 done", sep = theme::FIELD_SEP)
+        );
     }
 
     #[test]

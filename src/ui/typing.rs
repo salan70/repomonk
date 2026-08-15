@@ -115,14 +115,13 @@ fn status_line(
     show_live_speed: bool,
     t: &UiStrings,
 ) -> Line<'static> {
-    let sep = || Span::styled("  │  ", Style::default().fg(theme::BORDER));
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(
             format!("{} {current_line}/{total_lines}", t.typing_line),
             Style::default().fg(theme::BLUE),
         ),
-        sep(),
+        theme::field_sep(),
         Span::styled(
             format!("{} {}", t.typing_misses, snap.misses),
             Style::default().fg(if snap.misses > 0 {
@@ -138,7 +137,7 @@ fn status_line(
             snap.misses,
             snap.elapsed_ms,
         );
-        spans.push(sep());
+        spans.push(theme::field_sep());
         spans.push(Span::styled(
             format!("{:.0} kpm", metrics.kpm),
             Style::default().fg(theme::YELLOW),
@@ -153,10 +152,10 @@ fn status_line(
         } else {
             Style::default().fg(theme::MUTED)
         };
-        spans.push(sep());
+        spans.push(theme::field_sep());
         spans.push(Span::styled(format!("⚡{}", fx.streak()), style));
     }
-    spans.push(sep());
+    spans.push(theme::field_sep());
     spans.push(Span::styled(
         t.typing_esc_pause,
         Style::default().fg(theme::MUTED),

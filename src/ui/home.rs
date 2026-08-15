@@ -105,14 +105,15 @@ pub fn draw_home(
 
 fn draw_summary(frame: &mut Frame, area: Rect, summary: &GlobalSummary, t: &UiStrings) {
     let text = format!(
-        "  {}  ·  {} {}  ·  {} {}  ·  {} {}",
+        "  {}{sep}{} {}{sep}{} {}{sep}{} {}",
         t.summary,
         summary.completed_files,
         t.files_done,
         summary.completed_chunks,
         t.chunks_done,
         summary.streak_days,
-        t.day_streak
+        t.day_streak,
+        sep = theme::FIELD_SEP,
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(

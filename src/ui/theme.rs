@@ -57,13 +57,21 @@ pub fn title_line(text: &str) -> Line<'static> {
     ))
 }
 
-/// Key-hint footer: keys in cyan, descriptions muted, dot separators.
+/// Separator between status/data fields (`12%  │  3/48 files`).
+pub const FIELD_SEP: &str = "  │  ";
+
+/// `FIELD_SEP` as a themed span, for status lines built from `Span`s.
+pub fn field_sep() -> Span<'static> {
+    Span::styled(FIELD_SEP, Style::default().fg(BORDER).bg(BG))
+}
+
+/// Key-hint footer: keys in cyan, descriptions muted, space-separated.
 pub fn key_hints(pairs: &[(&str, &str)]) -> Line<'static> {
     let mut spans = Vec::new();
     spans.push(Span::styled(" ", base_style()));
     for (i, (key, desc)) in pairs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ·  ", Style::default().fg(MUTED).bg(BG)));
+            spans.push(Span::styled("   ", Style::default().fg(MUTED).bg(BG)));
         }
         spans.push(Span::styled(
             (*key).to_string(),
@@ -108,5 +116,58 @@ pub fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         y: area.y + (area.height - h) / 2,
         width: w,
         height: h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn field_sep_uses_box_drawing_bar() {
+        assert_eq!(FIELD_SEP, "  │  ");
+        assert_eq!(field_sep().content, FIELD_SEP);
+    }
+
+    #[test]
+    fn key_hints_are_space_separated() {
+        let line = key_hints(&[("Enter", "open"), ("q", "quit")]);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " Enter open   q quit");
+        assert!(!text.contains('·'));
+    }
+
+    #[test]
+    fn ui_source_does_not_use_middle_dot_as_separator() {
+        let needle = format!(" {} ", '\u{00B7}');
+        let ui_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+        let mut failures = Vec::new();
+        collect_separator_hits(&ui_dir, &needle, &mut failures);
+        assert!(
+            failures.is_empty(),
+            "middle-dot field separators are forbidden; use theme::FIELD_SEP or key_hints:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    fn collect_separator_hits(dir: &Path, needle: &str, failures: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect_separator_hits(&path, needle, failures);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains(needle) {
+                    failures.push(format!("{}:{}: {line}", path.display(), i + 1));
+                }
+            }
+        }
     }
 }

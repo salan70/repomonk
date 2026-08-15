@@ -8,6 +8,7 @@ Claude Code 向けの入口です。作業ルールの正は [AGENTS.md](AGENTS.
 - [AGENTS.md](AGENTS.md) — 文書の優先順位、実装ルール、検証ルール、Git運用ルール
 - [docs/product-requirements.md](docs/product-requirements.md) — ユーザーから見える挙動の正
 - [docs/architecture.md](docs/architecture.md) — モジュール境界と依存方向
+- [docs/ui-guidelines.md](docs/ui-guidelines.md) — TUIの見た目・区切り・共有ヘルパー
 - [docs/decisions.md](docs/decisions.md) — 決定事項の記録
 
 ## 標準コマンド
