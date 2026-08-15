@@ -21,7 +21,7 @@ jobs:
     name: fmt / clippy / test
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml が stable と rustfmt / clippy を指定しているため、
       # ランナー同梱の rustup がそのまま解決する。
@@ -33,7 +33,7 @@ jobs:
       # rusqlite の bundled SQLite と tree-sitter の grammar は C ビルドを伴い、
       # 毎回のビルドが長いためキャッシュする。
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
